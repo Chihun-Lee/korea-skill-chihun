@@ -82,7 +82,7 @@ def wait_for(pred, timeout=10.0, step=0.05):
 
 def spec():
     return JobSpec(
-        dep="수서", arr="부산", date="20260801", time="080000",
+        dep="수서", arr="부산", date="20991201", time="080000",
         train_number=None, passengers=1, seat_pref="general",
         pay_mode=PayMode.MANUAL,
     )

@@ -119,7 +119,7 @@ def test_worker_recovers_without_wedging(monkeypatch=None):
     )
 
     spec = srt_worker.JobSpec(
-        dep="수서", arr="부산", date="20260701", time="090000",
+        dep="수서", arr="부산", date="20991201", time="090000",
         train_number=None, passengers=1, seat_pref="any",
         pay_mode=srt_worker.PayMode.MANUAL,
     )
@@ -174,7 +174,7 @@ def test_worker_survives_nonstring_netfunnel_msg():
     )
 
     spec = srt_worker.JobSpec(
-        dep="수서", arr="부산", date="20260701", time="090000",
+        dep="수서", arr="부산", date="20991201", time="090000",
         train_number=None, passengers=1, seat_pref="any",
         pay_mode=srt_worker.PayMode.MANUAL,
     )
@@ -258,7 +258,7 @@ def _setup_ktx(fake_cls):
 
 def _run_ktx_job():
     spec = ktx_worker.JobSpec(
-        dep="서울", arr="부산", date="20260701", time="090000",
+        dep="서울", arr="부산", date="20991201", time="090000",
         train_id="NONE|0|0", train_type="ktx", passengers=1,
         seat_pref="any", pay_mode=ktx_worker.PayMode.MANUAL,
     )
@@ -336,11 +336,11 @@ def _wait_status(job, statuses, timeout=5.0):
 def test_srt_dedup_blocks_when_already_paid():
     """서버 재시작 복원 시나리오: 이미 결제된 표가 있으면 재예매 없이 종료."""
     _srt_dedup_setup([types.SimpleNamespace(
-        dep_station_name="수서", arr_station_name="부산", dep_date="20260701",
+        dep_station_name="수서", arr_station_name="부산", dep_date="20991201",
         train_number="301", paid=True,
     )])
     spec = srt_worker.JobSpec(
-        dep="수서", arr="부산", date="20260701", time="090000",
+        dep="수서", arr="부산", date="20991201", time="090000",
         train_number=None, passengers=1, seat_pref="any",
         pay_mode=srt_worker.PayMode.AUTO,
     )
@@ -357,8 +357,8 @@ def test_srt_dedup_blocks_when_already_paid():
 def test_srt_dedup_adopts_unpaid_reservation():
     """크래시가 예약~결제 사이에 난 시나리오: 미결제 예약을 이어받아 결제만 진행."""
     res = types.SimpleNamespace(
-        dep_station_name="수서", arr_station_name="부산", dep_date="20260701",
-        train_number="301", paid=False, payment_date="20260701", payment_time="235900",
+        dep_station_name="수서", arr_station_name="부산", dep_date="20991201",
+        train_number="301", paid=False, payment_date="20991201", payment_time="235900",
     )
     _srt_dedup_setup([res], creds=types.SimpleNamespace(
         srt_id="tester", srt_password="pw", card_number="1234123412341234",
@@ -366,7 +366,7 @@ def test_srt_dedup_adopts_unpaid_reservation():
         card_installment=0, card_type="J",
     ))
     spec = srt_worker.JobSpec(
-        dep="수서", arr="부산", date="20260701", time="090000",
+        dep="수서", arr="부산", date="20991201", time="090000",
         train_number=None, passengers=1, seat_pref="any",
         pay_mode=srt_worker.PayMode.AUTO,
     )
@@ -399,11 +399,11 @@ def test_ktx_dedup_blocks_when_already_ticketed():
     _setup_ktx(FakeKorailWithHistory)
     ktx_worker.DEDUP_RETRY_BASE = 0.01
     FakeKorailWithHistory.ticket_list = [types.SimpleNamespace(
-        dep_name="서울", arr_name="부산", dep_date="20260701", train_no="101",
+        dep_name="서울", arr_name="부산", dep_date="20991201", train_no="101",
     )]
     FakeKorailWithHistory.searched = 0
     spec = ktx_worker.JobSpec(
-        dep="서울", arr="부산", date="20260701", time="090000",
+        dep="서울", arr="부산", date="20991201", time="090000",
         train_id=None, train_type="ktx", passengers=1,
         seat_pref="any", pay_mode=ktx_worker.PayMode.MANUAL,
     )
@@ -415,23 +415,59 @@ def test_ktx_dedup_blocks_when_already_ticketed():
     print("  [ok] KTX 발권완료 표 감지 → 재예매 없이 즉시 종료(PAID)")
 
 
+def test_dead_target_auto_stop():
+    """당일 특정 열차가 계속 조회 안 되면(출발 경과) 자동 종료 — 죽은 잡 방지.
+
+    실사고(2026-07-26): 15:07 열차 잡이 출발 후 8시간 동안 653회 헛폴링.
+    """
+    from datetime import datetime as _dt
+    _srt_dedup_setup([])  # search_train이 항상 [] → 대상 미조회 연속
+    spec = srt_worker.JobSpec(
+        dep="수서", arr="부산", date=_dt.now().strftime("%Y%m%d"), time="000000",
+        train_number="9999", passengers=1, seat_pref="any",
+        pay_mode=srt_worker.PayMode.MANUAL,
+    )
+    job = srt_worker.manager.create(spec)
+    st = _wait_status(job, (srt_worker.JobStatus.STOPPED,), timeout=8)
+    srt_worker.manager.stop(job.id)
+    assert st == srt_worker.JobStatus.STOPPED, st
+    assert "자동 종료" in (job.error or ""), job.error
+    print("  [ok] 당일 대상 열차 미조회 연속 → 잡 자동 종료(출발 경과 추정)")
+
+
+def test_past_date_auto_stop():
+    """출발일이 지난 잡은 로그인/폴링 없이 즉시 종료된다."""
+    _srt_dedup_setup([])
+    spec = srt_worker.JobSpec(
+        dep="수서", arr="부산", date="20200101", time="080000",
+        train_number=None, passengers=1, seat_pref="any",
+        pay_mode=srt_worker.PayMode.MANUAL,
+    )
+    job = srt_worker.manager.create(spec)
+    st = _wait_status(job, (srt_worker.JobStatus.STOPPED,), timeout=5)
+    srt_worker.manager.stop(job.id)
+    assert st == srt_worker.JobStatus.STOPPED, st
+    assert "출발일 경과" in (job.error or ""), job.error
+    print("  [ok] 출발일 지난 잡 → 즉시 자동 종료")
+
+
 def test_find_active_duplicate():
     """같은 구간·날짜 활성 잡 이중 등록 감지(API 409의 근거)."""
     _srt_dedup_setup([])  # 이력 없음 → 계속 폴링
     spec = srt_worker.JobSpec(
-        dep="동탄", arr="목포", date="20261225", time="080000",
+        dep="동탄", arr="목포", date="20991225", time="080000",
         train_number=None, passengers=1, seat_pref="general",
         pay_mode=srt_worker.PayMode.MANUAL,
     )
     job = srt_worker.manager.create(spec)
     try:
         same = srt_worker.JobSpec(
-            dep="동탄", arr="목포", date="20261225", time="100000",
+            dep="동탄", arr="목포", date="20991225", time="100000",
             train_number=None, passengers=2, seat_pref="any",
             pay_mode=srt_worker.PayMode.AUTO,
         )
         other_day = srt_worker.JobSpec(
-            dep="동탄", arr="목포", date="20261226", time="080000",
+            dep="동탄", arr="목포", date="20991226", time="080000",
             train_number=None, passengers=1, seat_pref="general",
             pay_mode=srt_worker.PayMode.MANUAL,
         )
@@ -492,4 +528,7 @@ if __name__ == "__main__":
     test_srt_dedup_adopts_unpaid_reservation()
     test_ktx_dedup_blocks_when_already_ticketed()
     test_find_active_duplicate()
+    print("죽은 잡 자동 정리(v2.3.2):")
+    test_dead_target_auto_stop()
+    test_past_date_auto_stop()
     print("\nALL PASS ✅")

@@ -32,7 +32,7 @@ ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
 # 이력 사전검사 + 활성 잡 이중등록 차단), 2.1.1 결제 기본값 자동(auto),
 # 2.2.0 시간표/환승 조회(구간별 조합, /api/*/timetable·transfer + lookup 폴링),
 # 2.3.0 한달치 시간표 프리페치 캐시(/api/*/prefetch + /api/cache/*).
-VERSION = "2.3.1"
+VERSION = "2.3.2"
 DEVELOPER = "이치헌 (Chihun Lee)"
 APP_NAME = "K-Rail Macro"
 

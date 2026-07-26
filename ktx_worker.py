@@ -45,6 +45,9 @@ WATCHDOG_PERIOD = 30.0
 HEARTBEAT_STALE = 480.0
 # 중복예매 사전검사(기존 발권/예약 조회) 실패 시 재시도 간격 배수(초)
 DEDUP_RETRY_BASE = 3.0
+# 특정 열차 지정 잡에서 '당일인데 대상 열차가 조회 안 됨'이 이 횟수 연속되면
+# 출발이 지난 것으로 보고 자동 종료한다(죽은 잡이 API만 두드리는 것 방지).
+DEAD_TARGET_MISS_LIMIT = 20
 
 
 def _safe_err(e: BaseException) -> str:
@@ -367,6 +370,13 @@ class JobManager:
     def _poll_loop(self, job: Job, gen: int, creds: config.KTXCredentials, active) -> bool:
         """폴링 본체. True면 작업 종료(결제 흐름 완료/정지), False면 재시작 대상."""
 
+        # 출발일이 지난 잡은 의미가 없다 — 로그인/폴링 없이 즉시 종료
+        if job.spec.date < datetime.now().strftime("%Y%m%d"):
+            job.status = JobStatus.STOPPED
+            job.error = "출발일 경과 — 자동 종료"
+            job.log("출발일이 지나 작업을 자동 종료합니다")
+            return True
+
         def _new_client() -> PatchedKorail:
             c = PatchedKorail(creds.ktx_id, creds.ktx_password, auto_login=False)
             # 로그인 호출에도 타임아웃이 걸리도록 로그인 전에 패치한다(없으면
@@ -409,6 +419,20 @@ class JobManager:
         passengers = [AdultPassenger(job.spec.passengers)]
         rc = RecoveryController()
         last_ok = time.monotonic()
+        dead_misses = 0  # 당일+특정열차 잡에서 대상이 연속으로 조회 안 된 횟수
+
+        def _count_dead_miss() -> bool:
+            """당일 특정 열차가 계속 조회되지 않으면(출발 경과 추정) 잡을 접는다."""
+            nonlocal dead_misses
+            if not job.spec.train_id or job.spec.date != datetime.now().strftime("%Y%m%d"):
+                return False
+            dead_misses += 1
+            if dead_misses < DEAD_TARGET_MISS_LIMIT:
+                return False
+            job.status = JobStatus.STOPPED
+            job.error = "대상 열차가 더 이상 조회되지 않음(출발 경과 추정) — 자동 종료"
+            job.log(job.error)
+            return True
 
         def _handle_antibot(msg: str) -> float:
             """안티봇/속도제한 차단 처리. 연속 실패에 비례한 백오프를 돌려준다.
@@ -458,7 +482,10 @@ class JobManager:
                 target = self._pick_target(trains, job.spec)
                 if target is None:
                     job.log(f"#{job.attempts} target not found")
+                    if _count_dead_miss():
+                        return True
                 else:
+                    dead_misses = 0
                     gen = target.has_general_seat()
                     spc = target.has_special_seat()
                     job.log(f"#{job.attempts} {target.train_no} general={gen} special={spc}")
@@ -496,6 +523,9 @@ class JobManager:
                 job.log(f"#{job.attempts} no results")
                 rc.on_success()
                 last_ok = time.monotonic()
+                # 당일 막차까지 끝나면 NoResults로만 응답한다 → 출발 경과로 간주
+                if _count_dead_miss():
+                    return True
             except NeedToLoginError:
                 job.log("세션 만료 감지 → 재로그인")
                 try:
