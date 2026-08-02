@@ -26,6 +26,7 @@ from srtgo.ktx import (
 import config
 import jobstore
 import schedule_cache
+import seatpref
 import timetable as tt
 from ktx_korail import PatchedKorail
 from recovery import RecoveryController
@@ -45,6 +46,14 @@ WATCHDOG_PERIOD = 30.0
 HEARTBEAT_STALE = 480.0
 # 중복예매 사전검사(기존 발권/예약 조회) 실패 시 재시도 간격 배수(초)
 DEDUP_RETRY_BASE = 3.0
+# 폴링 중에도 이 주기로 계정 이력을 재검사한다 — 수동 예매·타 세션 예매를
+# 표 잡기 전에 감지해 중복예매를 막는다(사전검사 1회로는 긴 폴링을 못 지킨다).
+DEDUP_RECHECK_PERIOD = 600.0
+# 좌석 개선(취소→즉시 재예약) 최대 시도 횟수 — 남은 좌석이 확인될 때만 시도
+SEAT_IMPROVE_MAX = 2
+# 코레일 좌석위치속성코드 (txtSeatAttCd2): 000 무관 / 012 창측 / 013 내측
+SEAT_LOC_ANY = "000"
+SEAT_LOC_WINDOW = "012"
 # 특정 열차 지정 잡에서 '당일인데 대상 열차가 조회 안 됨'이 이 횟수 연속되면
 # 출발이 지난 것으로 보고 자동 종료한다(죽은 잡이 API만 두드리는 것 방지).
 DEAD_TARGET_MISS_LIMIT = 20
@@ -108,6 +117,18 @@ class JobSpec:
     seat_pref: str  # "general" | "special" | "any"
     pay_mode: PayMode
     include_waiting: bool = False
+    # 좌석 위치 선호 — 1인 예매일 때만 적용(다인은 나란한 좌석이 더 중요).
+    # 남은 좌석이 그것뿐이면 선호를 포기하고 그대로 예매한다.
+    prefer_window: bool = True     # 창측 우선
+    avoid_edge_rows: bool = True   # 호차 맨앞/맨뒷열 회피
+
+
+def _same_train_no(a, b) -> bool:
+    """열차번호 비교 — 검색('123')과 내역('00123')의 0-패딩 차이를 흡수한다."""
+    try:
+        return int(str(a)) == int(str(b))
+    except (TypeError, ValueError):
+        return str(a) == str(b)
 
 
 def _spec_matches_entry(spec: JobSpec, t) -> bool:
@@ -125,7 +146,8 @@ def _spec_matches_entry(spec: JobSpec, t) -> bool:
         return False
     if spec.train_id and "|" in spec.train_id:
         want_no = spec.train_id.split("|")[1]
-        return getattr(t, "train_no", None) == want_no
+        # 0-패딩 차이('123' vs '00123')로 중복을 놓치지 않도록 숫자 비교
+        return _same_train_no(getattr(t, "train_no", None), want_no)
     return True
 
 
@@ -413,6 +435,7 @@ class JobManager:
         preflight = self._preflight_dedup(client, job, creds)
         if preflight is not None:
             return preflight
+        last_dedup = time.monotonic()
 
         seat_option = self._seat_pref_to_option(job.spec.seat_pref)
         train_type = TRAIN_TYPE_MAP.get(job.spec.train_type.lower(), TrainType.KTX)
@@ -469,6 +492,14 @@ class JobManager:
                 except Exception as e:
                     job.log(f"선제 재로그인 실패: {_safe_err(e)}")
 
+            # 방어③ 주기적 재검사: 긴 폴링 중 수동 예매나 다른 세션이 이미 같은
+            # 표를 잡았을 수 있다 — 10분마다 계정 이력을 다시 확인한다.
+            if time.monotonic() - last_dedup > DEDUP_RECHECK_PERIOD:
+                last_dedup = time.monotonic()
+                recheck = self._preflight_dedup(client, job, creds)
+                if recheck is not None:
+                    return recheck
+
             try:
                 trains = client.search_train(
                     job.spec.dep, job.spec.arr,
@@ -490,13 +521,21 @@ class JobManager:
                     spc = target.has_special_seat()
                     job.log(f"#{job.attempts} {target.train_no} general={gen} special={spc}")
                     if self._can_take(gen, spc, job.spec.seat_pref):
-                        try:
-                            res = client.reserve(target, passengers=passengers, option=seat_option)
-                        except SoldOutError:
-                            job.log("reserve race lost (sold out)")
-                        except KorailError as e:
-                            job.log(f"reserve error: {_safe_err(e)}")
-                        else:
+                        # 방어① 예약 직전 재확인: 감시자가 이 스레드를 교체했거나
+                        # 정지된 뒤라면 절대 예약하지 않는다(구세대 스레드가 새
+                        # 스레드와 같은 표를 또 잡는 사고 차단).
+                        if not active():
+                            break
+                        res = self._reserve_with_pref(client, job, target, passengers, seat_option)
+                        if res is not None:
+                            # 방어② 예약 직후 계정 이력 스윕: 어떤 경로로든 같은
+                            # 표가 2건이 됐으면 여기서 정리한다.
+                            res, done = self._post_reserve_sweep(client, job, res)
+                            if done:
+                                return True
+                            res = self._improve_seat(client, job, passengers, seat_option, res, active)
+                            if res is None:
+                                continue  # 개선 중 좌석을 놓침 → 폴링 재개
                             job._reservation = res
                             job.reservation_summary = str(res)
                             job.reservation_id = getattr(res, "rsv_id", None)
@@ -565,6 +604,149 @@ class JobManager:
                 break
 
         return False  # 정지/교체 요청 → 상위에서 정리
+
+    def _reserve_with_pref(self, client: PatchedKorail, job: Job, target, passengers, option):
+        """예약 실행 — 1인 예매면 창측(좌석위치속성 012)을 먼저 요청하고 폴백.
+
+        창측이 없으면 코레일이 오류를 주므로 위치 무관(000)으로 즉시 한 번 더
+        시도한다 — '어쩔 수 없으면 아무 자리라도 잡는다'는 원칙.
+        반환: 예약 성공 시 Reservation, 실패(매진 경쟁 패배 등) 시 None.
+        예약대기 신청(좌석 없음)에는 좌석위치 요청이 의미가 없어 건너뛴다.
+        """
+        if job.spec.prefer_window and job.spec.passengers == 1 and target.has_seat():
+            try:
+                return client.reserve(
+                    target, passengers=passengers, option=option,
+                    seat_location=SEAT_LOC_WINDOW,
+                )
+            except (SoldOutError, KorailError) as e:
+                job.log(f"창측 예약 실패 → 좌석위치 무관으로 즉시 재시도: {_safe_err(e)[:80]}")
+        try:
+            return client.reserve(target, passengers=passengers, option=option)
+        except SoldOutError:
+            job.log("reserve race lost (sold out)")
+            return None
+        except KorailError as e:
+            job.log(f"reserve error: {_safe_err(e)}")
+            return None
+
+    def _post_reserve_sweep(self, client: PatchedKorail, job: Job, res):
+        """예약 직후 계정 이력을 다시 조회해 같은 표 중복을 정리한다(사후 검증).
+
+        스레드 경쟁·서버 재시작·수동 예매 등 어떤 경로로 중복이 생겼든 결제
+        전에 여기서 잡는다: 이미 발권(결제)된 같은 표가 있으면 방금 예약을
+        취소하고 그 표를 쓰고, 같은 열차의 미결제 중복은 방금 것만 남기고
+        취소한다. 다른 열차의 미결제 예약은 의도적일 수 있어 경고만 남긴다.
+        반환: (유지할 예약, 작업종료 여부).
+        """
+        try:
+            tickets = client.tickets() or []
+            reservations = client.reservations() or []
+        except Exception as e:
+            job.log(f"사후 중복검사 실패(그대로 진행): {_safe_err(e)[:80]}")
+            return res, False
+        paid = next((t for t in tickets if _spec_matches_entry(job.spec, t)), None)
+        if paid is not None:
+            job.log(f"⚠ 이미 발권된 같은 표 발견 → 방금 잡은 예약을 취소하고 기존 표 사용: {paid}")
+            try:
+                client.cancel(res)
+            except Exception as e:
+                job.log(f"⚠ 신규예약 취소 실패 — 코레일톡에서 직접 취소 필요: {_safe_err(e)[:80]}")
+            job.reservation_summary = f"[기존 발권 표 사용] {paid}"
+            job.status = JobStatus.PAID
+            return None, True
+        others = [
+            r for r in reservations
+            if _spec_matches_entry(job.spec, r)
+            and getattr(r, "rsv_id", None) != getattr(res, "rsv_id", None)
+        ]
+        for m in others:
+            if _same_train_no(getattr(m, "train_no", None), getattr(res, "train_no", None)):
+                job.log(f"⚠ 같은 열차 중복 예약 감지 → 초과분 취소: {m}")
+                try:
+                    client.cancel(m)
+                except Exception as e:
+                    job.log(f"⚠ 중복예약 취소 실패 — 코레일톡에서 직접 취소 필요: {_safe_err(e)[:80]}")
+            else:
+                job.log(f"ℹ 같은 구간 다른 열차의 미결제 예약이 계정에 있음(그대로 둠): {m}")
+        return res, False
+
+    def _improve_seat(self, client: PatchedKorail, job: Job, passengers, option, res, active):
+        """배정 좌석이 선호(창측·중간열)에 못 미치면 취소→즉시 재예약으로 개선한다.
+
+        반드시 '대상 열차에 다른 좌석이 남아있음'을 확인한 뒤에만 취소한다 —
+        남은 자리가 그것뿐이면 그대로 진행(사용자 원칙). 재예약까지 실패하면
+        None을 반환해 폴링으로 복귀한다(표를 잃은 상태, 계속 재도전).
+        예약대기(좌석 미배정)는 개선 대상이 아니다.
+        """
+        spec = job.spec
+        if spec.passengers != 1 or not (spec.prefer_window or spec.avoid_edge_rows):
+            return res
+        if getattr(res, "is_waiting", False):
+            return res
+        train_type = TRAIN_TYPE_MAP.get(spec.train_type.lower(), TrainType.KTX)
+        for _ in range(SEAT_IMPROVE_MAX):
+            if not active():
+                return res
+            seats_obj = list(getattr(res, "tickets", None) or [])
+            seats = [s.seat for s in seats_obj]
+            types = [getattr(s, "seat_type", None) for s in seats_obj]
+            score = seatpref.group_score(
+                seats, types, spec.prefer_window, spec.avoid_edge_rows)
+            if not seats or score >= seatpref.max_score():
+                if seats:
+                    job.log(f"좌석 확인: {seatpref.describe(seats, types)} — 선호 충족")
+                return res
+            job.log(f"좌석 확인: {seatpref.describe(seats, types)} — 남은 좌석 있으면 개선 시도")
+            # 우리가 예약을 쥔 상태에서 같은 열차가 여전히 '예약가능'이면
+            # 우리 좌석 말고도 남은 자리가 있다는 뜻 — 그때만 바꿔치기한다.
+            try:
+                trains = client.search_train(
+                    spec.dep, spec.arr, spec.date, spec.time,
+                    train_type=train_type, include_no_seats=True,
+                )
+            except NoResultsError:
+                job.log("남은 좌석 없음 — 배정 좌석 그대로 진행")
+                return res
+            except Exception as e:
+                job.log(f"남은 좌석 확인 실패 → 현재 좌석 유지: {_safe_err(e)[:60]}")
+                return res
+            now = next(
+                (t for t in trains if _same_train_no(t.train_no, getattr(res, "train_no", None))),
+                None)
+            is_special = any("특" in str(t) for t in types if t)
+            avail = now is not None and (
+                now.has_special_seat() if is_special else now.has_general_seat()
+            )
+            if not avail:
+                job.log("남은 좌석 없음 — 배정 좌석 그대로 진행")
+                return res
+            try:
+                if not client.cancel(res):
+                    job.log("개선용 취소 실패 → 현재 좌석 유지")
+                    return res
+            except Exception as e:
+                job.log(f"개선용 취소 실패 → 현재 좌석 유지: {_safe_err(e)[:60]}")
+                return res
+            new_res = None
+            for _retry in range(3):
+                new_res = self._reserve_with_pref(client, job, now, passengers, option)
+                if new_res is not None or job._stop.wait(0.8):
+                    break
+            if new_res is None:
+                job.log("⚠ 개선 재예약 실패 — 좌석을 놓침. 폴링 재개")
+                return None
+            new_obj = list(getattr(new_res, "tickets", None) or [])
+            new_seats = [s.seat for s in new_obj]
+            new_types = [getattr(s, "seat_type", None) for s in new_obj]
+            new_score = seatpref.group_score(
+                new_seats, new_types, spec.prefer_window, spec.avoid_edge_rows)
+            job.log(f"재배정 좌석: {seatpref.describe(new_seats, new_types)}")
+            if new_score <= score:
+                job.log("더 나은 좌석이 안 나옴 — 이대로 진행")
+                return new_res
+            res = new_res
+        return res
 
     def _handle_payment(self, client: PatchedKorail, job: Job, creds: config.KTXCredentials) -> bool:
         """결제 흐름. True=작업 종료(결제/오류/정지), False=폴링 재개(확인 시간초과)."""

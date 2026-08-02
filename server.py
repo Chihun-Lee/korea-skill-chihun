@@ -31,8 +31,10 @@ ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
 # 버전은 2.x = SRT+KTX 통합 GUI 세대. 2.1.0 중복예매 방지(계정 예약/발권
 # 이력 사전검사 + 활성 잡 이중등록 차단), 2.1.1 결제 기본값 자동(auto),
 # 2.2.0 시간표/환승 조회(구간별 조합, /api/*/timetable·transfer + lookup 폴링),
-# 2.3.0 한달치 시간표 프리페치 캐시(/api/*/prefetch + /api/cache/*).
-VERSION = "2.3.2"
+# 2.3.0 한달치 시간표 프리페치 캐시(/api/*/prefetch + /api/cache/*),
+# 2.4.0 좌석 선호(창측 우선 + 맨앞/뒷열 회피, 잔여석 있을 때만 개선) +
+#       중복예매 방어 3중 추가(예약 직전 재확인·직후 이력 스윕·10분 주기 재검사).
+VERSION = "2.4.0"
 DEVELOPER = "이치헌 (Chihun Lee)"
 APP_NAME = "K-Rail Macro"
 
@@ -282,6 +284,9 @@ class SRTJobIn(BaseModel):
     seat_pref: str = Field(default="general", pattern="^(general|special|any)$")
     # 기본 자동결제 — 카드정보가 Keychain에 저장돼 있어야 한다
     pay_mode: str = Field(default="auto", pattern="^(auto|manual)$")
+    # 좌석 위치 선호(1인 예매만 적용) — 남은 자리가 그것뿐이면 포기하고 예매
+    prefer_window: bool = True
+    avoid_edge_rows: bool = True
 
 
 @srt_router.get("/config/status")
@@ -428,6 +433,8 @@ def _srt_to_dict(j: srt_worker.Job) -> dict:
             "passengers": j.spec.passengers,
             "seat_pref": j.spec.seat_pref,
             "pay_mode": j.spec.pay_mode,
+            "prefer_window": j.spec.prefer_window,
+            "avoid_edge_rows": j.spec.avoid_edge_rows,
         },
         "created_at": j.created_at,
         "attempts": j.attempts,
@@ -451,6 +458,7 @@ def srt_jobs_create(body: SRTJobIn):
         dep=body.dep, arr=body.arr, date=body.date, time=body.time,
         train_number=body.train_number, passengers=body.passengers,
         seat_pref=body.seat_pref, pay_mode=srt_worker.PayMode(body.pay_mode),
+        prefer_window=body.prefer_window, avoid_edge_rows=body.avoid_edge_rows,
     )
     dup = srt_worker.manager.find_active_duplicate(spec)
     if dup:
@@ -518,6 +526,9 @@ class KTXJobIn(BaseModel):
     # 기본 자동결제 — 카드정보가 Keychain에 저장돼 있어야 한다
     pay_mode: str = Field(default="auto", pattern="^(auto|manual)$")
     include_waiting: bool = False
+    # 좌석 위치 선호(1인 예매만 적용) — 남은 자리가 그것뿐이면 포기하고 예매
+    prefer_window: bool = True
+    avoid_edge_rows: bool = True
 
 
 @ktx_router.get("/config/status")
@@ -662,6 +673,8 @@ def _ktx_to_dict(j: ktx_worker.Job) -> dict:
             "seat_pref": j.spec.seat_pref,
             "pay_mode": j.spec.pay_mode,
             "include_waiting": j.spec.include_waiting,
+            "prefer_window": j.spec.prefer_window,
+            "avoid_edge_rows": j.spec.avoid_edge_rows,
         },
         "created_at": j.created_at,
         "attempts": j.attempts,
@@ -691,6 +704,7 @@ def ktx_jobs_create(body: KTXJobIn):
         passengers=body.passengers, seat_pref=body.seat_pref,
         pay_mode=ktx_worker.PayMode(body.pay_mode),
         include_waiting=body.include_waiting,
+        prefer_window=body.prefer_window, avoid_edge_rows=body.avoid_edge_rows,
     )
     dup = ktx_worker.manager.find_active_duplicate(spec)
     if dup:

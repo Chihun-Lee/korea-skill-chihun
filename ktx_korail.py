@@ -22,7 +22,14 @@ from typing import Any
 
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
-from srtgo.ktx import Korail as _SrtgoKorail
+from srtgo.ktx import (
+    AdultPassenger,
+    Korail as _SrtgoKorail,
+    Passenger,
+    ReserveOption,
+    SoldOutError,
+)
+from srtgo.ktx import API_ENDPOINTS as _KTX_API
 
 DYNAPATH_PATHS = [
     "/classes/com.korail.mobile.certification.TicketReservation",
@@ -200,3 +207,88 @@ class PatchedKorail(_SrtgoKorail):
         _patch_session(self._session)
         if auto_login:
             self.login(korail_id, korail_pw)
+
+    def reserve(self, train, passengers=None, option=ReserveOption.GENERAL_FIRST,
+                seat_location: str = "000"):
+        """upstream reserve + 좌석위치속성코드(txtSeatAttCd2) 지정.
+
+        seat_location: "000" 무관(기본) / "012" 창측 / "013" 내측 — SRT와 같은
+        KROSS 좌석속성코드 계열. 창측을 요청했는데 창측이 없으면 코레일이
+        오류를 주므로, 호출측(워커)이 "000"으로 즉시 재시도해 폴백한다.
+        본문은 srtgo.ktx.Korail.reserve를 그대로 옮기고 txtSeatAttCd2만
+        파라미터화했다 — upstream이 바뀌면 여기도 맞춰야 한다.
+        """
+        reserving_seat = train.has_seat() or train.wait_reserve_flag < 0
+        if reserving_seat:
+            is_special_seat = {
+                ReserveOption.GENERAL_ONLY: False,
+                ReserveOption.SPECIAL_ONLY: True,
+                ReserveOption.GENERAL_FIRST: not train.has_general_seat(),
+                ReserveOption.SPECIAL_FIRST: train.has_special_seat(),
+            }[option]
+        else:
+            is_special_seat = {
+                ReserveOption.GENERAL_ONLY: False,
+                ReserveOption.SPECIAL_ONLY: True,
+                ReserveOption.GENERAL_FIRST: False,
+                ReserveOption.SPECIAL_FIRST: True,
+            }[option]
+
+        passengers = passengers or [AdultPassenger()]
+        passengers = Passenger.reduce(passengers)
+        cnt = sum(p.count for p in passengers)
+
+        data = {
+            "Device": self._device,
+            "Version": self._version,
+            "Key": self._key,
+            "txtMenuId": "11",
+            "txtJobId": "1101" if reserving_seat else "1102",
+            "txtGdNo": "",
+            "hidFreeFlg": "N",
+            "txtTotPsgCnt": cnt,
+            "txtSeatAttCd1": "000",
+            "txtSeatAttCd2": seat_location,
+            "txtSeatAttCd3": "000",
+            "txtSeatAttCd4": "015",
+            "txtSeatAttCd5": "000",
+            "txtStndFlg": "N",
+            "txtSrcarCnt": "0",
+            "txtJrnyCnt": "1",
+            "txtJrnySqno1": "001",
+            "txtJrnyTpCd1": "11",
+            "txtDptDt1": train.dep_date,
+            "txtDptRsStnCd1": train.dep_code,
+            "txtDptTm1": train.dep_time,
+            "txtArvRsStnCd1": train.arr_code,
+            "txtTrnNo1": train.train_no,
+            "txtRunDt1": train.run_date,
+            "txtTrnClsfCd1": train.train_type,
+            "txtTrnGpCd1": train.train_group,
+            "txtPsrmClCd1": "2" if is_special_seat else "1",
+            "txtChgFlg1": "",
+            "txtJrnySqno2": "",
+            "txtJrnyTpCd2": "",
+            "txtDptDt2": "",
+            "txtDptRsStnCd2": "",
+            "txtDptTm2": "",
+            "txtArvRsStnCd2": "",
+            "txtTrnNo2": "",
+            "txtRunDt2": "",
+            "txtTrnClsfCd2": "",
+            "txtPsrmClCd2": "",
+            "txtChgFlg2": "",
+        }
+
+        for i, psg in enumerate(passengers, 1):
+            data.update(psg.get_dict(i))
+
+        r = self._session.get(_KTX_API["reserve"], params=data)
+        self._log(r.text)
+        j = json.loads(r.text)
+        if self._result_check(j):
+            rsv_id = j.get("h_pnr_no")
+            reservation = self.reservations(rsv_id)
+            return reservation
+        else:
+            raise SoldOutError()

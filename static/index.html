@@ -137,6 +137,11 @@
       <label>결제 모드</label>
       <select id="srt-j-pay"><option value="auto" selected>자동</option><option value="manual">수동</option></select>
     </div>
+    <div class="row">
+      <label><input type="checkbox" id="srt-j-window" checked> 창측 우선</label>
+      <label><input type="checkbox" id="srt-j-noedge" checked> 맨앞/뒷열 회피</label>
+      <span class="compact">(1인 예매만 적용 · 남은 자리가 그것뿐이면 그대로 예매)</span>
+    </div>
     <div class="row compact">조회 패턴: 2~60초 랜덤 sleep, NetFunnel 자동 회복</div>
     <div class="row"><button id="srt-btn-create-job">시작</button></div>
   </fieldset>
@@ -227,6 +232,11 @@
       <select id="ktx-j-seat"><option value="any">아무거나</option><option value="general" selected>일반실</option><option value="special">특실</option></select>
       <label>결제 모드</label>
       <select id="ktx-j-pay"><option value="auto" selected>자동</option><option value="manual">수동</option></select>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="ktx-j-window" checked> 창측 우선</label>
+      <label><input type="checkbox" id="ktx-j-noedge" checked> 맨앞/뒷열 회피</label>
+      <span class="compact">(1인 예매만 적용 · 남은 자리가 그것뿐이면 그대로 예매)</span>
     </div>
     <div class="row compact">
       <label>특정 열차</label><span id="ktx-j-train-label">(미지정)</span>
@@ -556,6 +566,8 @@ function makeService(opts) {
         train_number: $("srt-j-train").value || null,
         passengers: parseInt($("srt-j-pax").value, 10),
         seat_pref: $("srt-j-seat").value, pay_mode: $("srt-j-pay").value,
+        prefer_window: $("srt-j-window").checked,
+        avoid_edge_rows: $("srt-j-noedge").checked,
       } : {
         dep: picks["ktx-j-dep"], arr: picks["ktx-j-arr"],
         date: ymd($("ktx-j-date").value), time: hms($("ktx-j-time").value),
@@ -563,6 +575,8 @@ function makeService(opts) {
         train_type: $("ktx-j-type").value,
         passengers: parseInt($("ktx-j-pax").value, 10),
         seat_pref: $("ktx-j-seat").value, pay_mode: $("ktx-j-pay").value,
+        prefer_window: $("ktx-j-window").checked,
+        avoid_edge_rows: $("ktx-j-noedge").checked,
       };
       const j = await api("POST", prefix + "/jobs", body);
       const trainStr = j.spec.train_number || j.spec.train_id || "(첫차)";
