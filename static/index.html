@@ -508,12 +508,24 @@ function makeService(opts) {
     btn.disabled = true;
     const origLabel = btn.textContent;
     btn.textContent = "조회 중...";
-    toast(`조회 중... (~30초)`);
+    toast(`조회 중... (성수기엔 SR 대기열 때문에 1~3분 걸릴 수 있음)`);
     try {
       const body = { dep: picks[p("-s-dep")], arr: picks[p("-s-arr")],
                      date: ymd($(p("-s-date")).value), time: hms($(p("-s-time")).value) };
       if (svc === "ktx") body.train_type = $("ktx-s-type").value;
-      const r = await api("POST", prefix + "/search", body);
+      // 비동기 조회: query_id 받아 폴링 (NetFunnel 대기열이 길어도 타임아웃 없이 최대 5분 대기)
+      const q = await api("POST", prefix + "/search/async", body);
+      const LIMIT = 300;
+      let r = null;
+      for (;;) {
+        await new Promise(res => setTimeout(res, 1500));
+        const st = await api("GET", `/api/lookup/${q.query_id}`, undefined, 10000);
+        const prog = st.progress ? ` · ${st.progress}` : "";
+        btn.textContent = `조회 중 ${st.elapsed}초${prog}`;
+        if (st.status === "done") { r = st.result; break; }
+        if (st.status === "error") throw new Error(st.error || "조회 실패");
+        if (st.elapsed > LIMIT) throw new Error(`${LIMIT}초 초과 — SR 서버 대기열이 너무 깁니다. 잠시 후 다시 시도`);
+      }
       const tbody = $(p("-search-table")).querySelector("tbody");
       tbody.innerHTML = "";
       if (r.trains.length === 0) {
@@ -669,8 +681,8 @@ makeService({ svc: "ktx", prefix: "/api/ktx", idLabel: "KTX ID", hasAlwaysCard: 
 
 // 버전·개발자 표기 (서버 /api/meta가 단일 진실 원천)
 api("GET", "/api/meta").then(m => {
-  $("app-version").textContent = "v" + m.version;
-  $("app-meta").textContent = `${m.name} v${m.version} · 개발자: ${m.developer} · 개인용 (본인 계정·본인 카드 한정)`;
+  $("app-version").textContent = `v${m.version} (${m.build_date || "-"} 업데이트)`;
+  $("app-meta").textContent = `${m.name} v${m.version} · 업데이트 ${m.build_date || "-"} · 개발자: ${m.developer} · 개인용 (본인 계정·본인 카드 한정)`;
 }).catch(() => {});
 
 // ─── 세션 상태 아이콘: 파비콘·탭 제목·헤더 배지 ─────────────────────────

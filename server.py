@@ -34,7 +34,8 @@ ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
 # 2.3.0 한달치 시간표 프리페치 캐시(/api/*/prefetch + /api/cache/*),
 # 2.4.0 좌석 선호(창측 우선 + 맨앞/뒷열 회피, 잔여석 있을 때만 개선) +
 #       중복예매 방어 3중 추가(예약 직전 재확인·직후 이력 스윕·10분 주기 재검사).
-VERSION = "2.4.1"
+VERSION = "2.4.2"
+BUILD_DATE = "2026-09-18"  # 마지막 업데이트일 — 버전 올릴 때 같이 갱신
 DEVELOPER = "이치헌 (Chihun Lee)"
 APP_NAME = "K-Rail Macro"
 
@@ -156,13 +157,14 @@ def index():
 
 @app.get("/api/meta")
 def meta():
-    return {"name": APP_NAME, "version": VERSION, "developer": DEVELOPER}
+    return {"name": APP_NAME, "version": VERSION, "build_date": BUILD_DATE, "developer": DEVELOPER}
 
 
 # ─── 비동기 조회(시간표/환승) 레지스트리 ────────────────────────────────
 # 환승 조회는 로그인 + 구간별 검색 여러 번이라 수 초~수십 초 걸린다. HTTP를
 # 오래 붙잡는 대신 즉시 query_id를 돌려주고 /api/lookup/{id}로 폴링하게 한다.
 import itertools
+import time
 import threading as _threading
 
 _lookups: dict[str, dict] = {}
@@ -173,7 +175,8 @@ _lookup_counter = itertools.count(1)
 def _start_lookup(fn, /, *args, **kw) -> str:
     with _lookup_lock:
         qid = f"q{next(_lookup_counter)}"
-        _lookups[qid] = {"status": "running", "result": None, "error": None}
+        _lookups[qid] = {"status": "running", "result": None, "error": None,
+                         "progress": "", "started_at": time.time()}
         # 오래된 결과 정리(최근 20개만 유지)
         for k in list(_lookups)[:-20]:
             if _lookups[k]["status"] != "running":
@@ -193,7 +196,40 @@ def lookup_result(qid: str):
     entry = _lookups.get(qid)
     if entry is None:
         raise HTTPException(status_code=404, detail="query not found (만료됐거나 잘못된 id)")
-    return {"query_id": qid, **entry}
+    return {"query_id": qid, "elapsed": round(time.time() - entry["started_at"]),
+            **{k: v for k, v in entry.items() if k != "started_at"}}
+
+
+def _set_lookup_progress(text: str) -> None:
+    """현재 스레드가 lookup 스레드(lookup-qN)이면 진행 문구를 기록한다."""
+    name = _threading.current_thread().name
+    if name.startswith("lookup-"):
+        entry = _lookups.get(name[len("lookup-"):])
+        if entry is not None:
+            entry["progress"] = text
+
+
+def _install_netfunnel_progress_hook() -> None:
+    """SRTrain NetFunnel이 print로만 알리는 대기열 상황("대기인원: N명")을
+    lookup 진행상황으로 가로챈다. (2026-09-18 — 추석 등 성수기엔 대기열 통과에
+    1~3분이 걸려 UI 60초 타임아웃으로 "조회 실패"가 났다. 조회를 비동기 폴링으로
+    바꾸고 대기열 위치를 UI에 보여준다.) 잡 스레드의 출력은 그대로 stdout으로."""
+    try:
+        import SRT.netfunnel as _nf
+    except Exception:
+        return
+    _orig_print = print
+
+    def _hooked_print(*args, **kw):
+        msg = " ".join(str(a) for a in args)
+        if "대기인원" in msg or "대기열" in msg:
+            _set_lookup_progress(msg.strip())
+        _orig_print(*args, **kw)
+
+    _nf.print = _hooked_print
+
+
+_install_netfunnel_progress_hook()
 
 
 # ─── 시간표 캐시 (한달치 사전 다운로드) ─────────────────────────────────
@@ -399,6 +435,14 @@ def srt_transfer(body: TransferIn):
 def srt_prefetch(body: PrefetchIn):
     """한달치 시간표 사전 다운로드 시작(수 분~수십 분) → /api/lookup/{id} 폴링."""
     return {"query_id": _start_lookup(srt_worker.prefetch_timetables, body.routes, body.days)}
+
+
+@srt_router.post("/search/async")
+def srt_search_async(body: SRTSearchIn):
+    """열차 조회 비동기 시작 → /api/lookup/{query_id} 폴링 (result = {"trains": [...]})."""
+    def run():
+        return {"trains": srt_worker.search_preview(body.dep, body.arr, body.date, body.time)}
+    return {"query_id": _start_lookup(run)}
 
 
 @srt_router.post("/search")
@@ -649,6 +693,14 @@ def ktx_transfer(body: KTXTransferIn):
 def ktx_prefetch(body: PrefetchIn):
     """한달치 시간표 사전 다운로드 시작(수 분~수십 분) → /api/lookup/{id} 폴링."""
     return {"query_id": _start_lookup(ktx_worker.prefetch_timetables, body.routes, body.days)}
+
+
+@ktx_router.post("/search/async")
+def ktx_search_async(body: KTXSearchIn):
+    """열차 조회 비동기 시작 → /api/lookup/{query_id} 폴링 (result = {"trains": [...]})."""
+    def run():
+        return {"trains": ktx_worker.search_preview(body.dep, body.arr, body.date, body.time, body.train_type)}
+    return {"query_id": _start_lookup(run)}
 
 
 @ktx_router.post("/search")
