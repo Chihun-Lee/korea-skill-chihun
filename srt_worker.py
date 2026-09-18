@@ -21,6 +21,18 @@ from SRT import SRT, Adult, SeatType
 from SRT.errors import SRTError, SRTNotLoggedInError, SRTNetFunnelError
 from SRT.netfunnel import NetFunnelHelper
 
+# ── SRTrain 열차종류코드 호환 패치 (2026-09-18) ────────────────────────────
+# SR 서버가 2026-09 초부터 열차종류코드(stlbTrnClsfCd)를 "17"(SRT) 대신
+# "0A"/"00"/"07"/"10" 등으로 내려보낸다. SRTrain 2.6.7은 train_name=="SRT"인
+# 열차만 남기고(search_train) 아닌 열차의 예약은 거부(reserve)하므로 조회 0건·
+# 예매 불가가 됐다. SR 앱 API는 SRT 영업열차만 반환하므로 전부 SRT로 취급한다.
+# (SRTrain 저장소는 2026-08-30 아카이브 — 업스트림 수정 없음. 라이브러리 재설치
+#  후에도 유지되도록 site-packages 대신 여기서 딕셔너리를 덮어쓴다.)
+import SRT.constants as _srt_constants
+for _code in ("0A", "00", "07", "10", "17"):
+    _srt_constants.TRAIN_NAME[_code] = "SRT"
+del _code
+
 import config
 import jobstore
 import schedule_cache

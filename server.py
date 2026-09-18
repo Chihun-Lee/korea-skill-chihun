@@ -34,7 +34,7 @@ ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
 # 2.3.0 한달치 시간표 프리페치 캐시(/api/*/prefetch + /api/cache/*),
 # 2.4.0 좌석 선호(창측 우선 + 맨앞/뒷열 회피, 잔여석 있을 때만 개선) +
 #       중복예매 방어 3중 추가(예약 직전 재확인·직후 이력 스윕·10분 주기 재검사).
-VERSION = "2.4.0"
+VERSION = "2.4.1"
 DEVELOPER = "이치헌 (Chihun Lee)"
 APP_NAME = "K-Rail Macro"
 
