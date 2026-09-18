@@ -152,7 +152,8 @@ def _on_startup() -> None:
 
 @app.get("/")
 def index():
-    return FileResponse(ROOT / "static" / "index.html")
+    # no-store: 업데이트 후 옛 UI(JS)가 브라우저 캐시에 남아 구 엔드포인트를 호출하던 문제 방지 (2026-09-18)
+    return FileResponse(ROOT / "static" / "index.html", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/meta")
