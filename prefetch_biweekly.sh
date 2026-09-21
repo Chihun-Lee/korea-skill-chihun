@@ -19,8 +19,8 @@ if ! curl -fsS -m 5 "http://127.0.0.1:$PORT/api/meta" >/dev/null 2>&1; then
   exit 0
 fi
 
-QS=$(curl -s -m 10 "http://127.0.0.1:$PORT/api/srt/prefetch" -X POST -H 'Content-Type: application/json' -d '{"days":30}')
-QK=$(curl -s -m 10 "http://127.0.0.1:$PORT/api/ktx/prefetch" -X POST -H 'Content-Type: application/json' -d '{"days":30}')
+# v3.0: 엔진이 코레일 하나로 합쳐져 프리페치도 한 번만 돈다(KTX+SRT 같이 받음).
+Q=$(curl -s -m 10 "http://127.0.0.1:$PORT/api/rail/prefetch" -X POST -H 'Content-Type: application/json' -d '{"days":30}')
 mkdir -p "$(dirname "$STAMP")"
 echo "$now" > "$STAMP"
-echo "[$(date '+%F %T')] 2주 주기 프리페치 시작: SRT=$QS KTX=$QK" >> "$LOG"
+echo "[$(date '+%F %T')] 2주 주기 프리페치 시작: $Q" >> "$LOG"

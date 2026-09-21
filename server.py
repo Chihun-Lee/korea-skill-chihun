@@ -1,11 +1,12 @@
-"""Unified FastAPI server for SRT + KTX macros.
+"""K-Rail 통합 서버 (v3.0) — 코레일 엔진 하나로 KTX와 SRT를 모두 다룬다.
 
-- /api/srt/*  → SRT macro (SRTrain, NetFunnel recovery)
-- /api/ktx/*  → KTX macro (srtgo + Dynapath bypass, anti-bot recovery)
-- Both run independently in the same process; jobs from each side
-  share nothing (separate JobManagers, separate Keychain entries).
+2026-09 코레일·SR 발매 통합으로 코레일 계정 하나에서 SRT까지 조회·예약·결제가
+된다(실측 확인). v2까지 있던 SR 전용 엔진(/api/srt)은 제거했다.
 
-Listens on 127.0.0.1:8912 (separate from the standalone 8910/8911).
+- /api/rail/*  → 통합 엔진 (KTX + SRT). 정식 경로.
+- /api/ktx/*   → 같은 라우터의 하위호환 별칭 (구 UI·스킬·폰 디스패치용).
+
+127.0.0.1:8912 에서 대기한다.
 """
 from __future__ import annotations
 
@@ -22,24 +23,22 @@ from pydantic import BaseModel, Field, ValidationError
 import card_test
 import config
 import schedule_cache
-import srt_worker
-import ktx_worker
+import rail_worker
+import stations
 
 # PyInstaller onefile로 묶이면 정적 파일은 임시 추출 경로(_MEIPASS)에 풀린다.
 ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
 
-# 버전은 2.x = SRT+KTX 통합 GUI 세대. 2.1.0 중복예매 방지(계정 예약/발권
-# 이력 사전검사 + 활성 잡 이중등록 차단), 2.1.1 결제 기본값 자동(auto),
-# 2.2.0 시간표/환승 조회(구간별 조합, /api/*/timetable·transfer + lookup 폴링),
-# 2.3.0 한달치 시간표 프리페치 캐시(/api/*/prefetch + /api/cache/*),
-# 2.4.0 좌석 선호(창측 우선 + 맨앞/뒷열 회피, 잔여석 있을 때만 개선) +
-#       중복예매 방어 3중 추가(예약 직전 재확인·직후 이력 스윕·10분 주기 재검사).
-VERSION = "2.4.2"
-BUILD_DATE = "2026-09-18"  # 마지막 업데이트일 — 버전 올릴 때 같이 갱신
+# 2.x = SRT 엔진 + KTX 엔진을 탭으로 나눠 쓰던 세대(중복예매 방지, 시간표/환승
+# 조회, 프리페치 캐시, 좌석 선호까지). 3.0.0에서 코레일·SR 발매 통합에 맞춰
+# 엔진을 코레일 하나로 합쳤다 — 탭 없는 단일 화면, 수서·동탄·평택지제 포함
+# 전국 46개 역, 조회 페이지네이션(하루치 전부), 열차번호 기준 잡 등록.
+VERSION = "3.0.0"
+BUILD_DATE = "2026-09-21"  # 마지막 업데이트일 — 버전 올릴 때 같이 갱신
 DEVELOPER = "이치헌 (Chihun Lee)"
 APP_NAME = "K-Rail Macro"
 
-app = FastAPI(title=f"{APP_NAME} (SRT + KTX, 개인용)", version=VERSION)
+app = FastAPI(title=f"{APP_NAME} (KTX + SRT 통합, 개인용)", version=VERSION)
 
 # 원격(폰) 접속을 위해 K_RAIL_HOST=0.0.0.0 으로 바인딩하더라도, 계정·카드
 # UI가 회사망/공용망에 노출되지 않도록 허용 대역 밖 접근은 전부 차단한다.
@@ -85,12 +84,12 @@ def _prevent_mac_sleep() -> None:
 
 
 def _any_active_jobs() -> bool:
-    for w in (srt_worker, ktx_worker):
-        for j in w.manager.list():
-            if not j._stop.is_set() and j.status in (
-                w.JobStatus.PENDING, w.JobStatus.POLLING, w.JobStatus.RESERVED,
-            ):
-                return True
+    w = rail_worker
+    for j in w.manager.list():
+        if not j._stop.is_set() and j.status in (
+            w.JobStatus.PENDING, w.JobStatus.POLLING, w.JobStatus.RESERVED,
+        ):
+            return True
     return False
 
 
@@ -144,10 +143,9 @@ def _on_startup() -> None:
         import threading
         threading.Thread(target=_lid_guard_loop, daemon=True, name="lid-guard").start()
     # 이전 프로세스가 죽으며 남긴 활성 잡을 자동 복원 — 표 잡을 때까지 계속.
-    n_srt = srt_worker.manager.restore()
-    n_ktx = ktx_worker.manager.restore()
-    if n_srt or n_ktx:
-        print(f"[k-rail] 이전 세션 작업 자동 복원: SRT {n_srt}건, KTX {n_ktx}건", flush=True)
+    n = rail_worker.manager.restore()
+    if n:
+        print(f"[k-rail] 이전 세션 작업 자동 복원: {n}건", flush=True)
 
 
 @app.get("/")
@@ -210,27 +208,8 @@ def _set_lookup_progress(text: str) -> None:
             entry["progress"] = text
 
 
-def _install_netfunnel_progress_hook() -> None:
-    """SRTrain NetFunnel이 print로만 알리는 대기열 상황("대기인원: N명")을
-    lookup 진행상황으로 가로챈다. (2026-09-18 — 추석 등 성수기엔 대기열 통과에
-    1~3분이 걸려 UI 60초 타임아웃으로 "조회 실패"가 났다. 조회를 비동기 폴링으로
-    바꾸고 대기열 위치를 UI에 보여준다.) 잡 스레드의 출력은 그대로 stdout으로."""
-    try:
-        import SRT.netfunnel as _nf
-    except Exception:
-        return
-    _orig_print = print
-
-    def _hooked_print(*args, **kw):
-        msg = " ".join(str(a) for a in args)
-        if "대기인원" in msg or "대기열" in msg:
-            _set_lookup_progress(msg.strip())
-        _orig_print(*args, **kw)
-
-    _nf.print = _hooked_print
-
-
-_install_netfunnel_progress_hook()
+# (v2의 SRTrain NetFunnel 대기열 훅은 SR 엔진과 함께 제거했다 — 코레일 엔진은
+#  안티봇 대기 상황을 워커 로그로 알린다.)
 
 
 # ─── 시간표 캐시 (한달치 사전 다운로드) ─────────────────────────────────
@@ -248,6 +227,12 @@ def cache_timetable(svc: str, dep: str, arr: str, date: str):
     return {"svc": svc, "dep": dep, "arr": arr, "date": date, **entry}
 
 
+@app.get("/api/stations")
+def station_list():
+    """코레일에서 실제로 동작하는 역 목록(지역별). UI·스킬의 단일 출처."""
+    return {"groups": stations.GROUPS, "all": stations.ALL, "aliases": stations.ALIASES}
+
+
 @app.get("/api/cache/status")
 def cache_status():
     return schedule_cache.status()
@@ -259,7 +244,7 @@ app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
 def _normalize_expire(raw: str) -> tuple[str, bool]:
     """카드 유효기간을 YYMM으로 정규화한다.
 
-    SRT(SRTrain)·KTX(srtgo) 둘 다 결제 시 YYMM(연-월)을 요구하는데, 사용자가
+    코레일(srtgo)은 결제 시 YYMM(연-월)을 요구하는데, 사용자가
     카드 표면의 MM/YY 순서대로 MMYY로 넣는 실수가 잦아 결제가 실패한다.
     뒤 2자리가 월(01~12)이 아니고 앞 2자리가 월이면 명백한 MMYY이므로 두 쪽을
     뒤집어 YYMM으로 고친다. 앞뒤 둘 다 월로 해석 가능한 애매한 값은 건드리지 않는다.
@@ -276,28 +261,7 @@ def _normalize_expire(raw: str) -> tuple[str, bool]:
     return d, False
 
 
-# ─── SRT routes ─────────────────────────────────────────────────────────
-srt_router = APIRouter(prefix="/api/srt")
-
-
-class SRTCredsIn(BaseModel):
-    srt_id: str
-    srt_password: str
-    card_number: str
-    card_password: str
-    card_validation: str
-    card_expire: str
-    card_type: str = "J"
-    card_installment: int = 0
-
-
-class SRTSearchIn(BaseModel):
-    dep: str
-    arr: str
-    date: str
-    time: str
-
-
+# ─── 공용 조회 모델 ─────────────────────────────────────────────────────
 class TimetableIn(BaseModel):
     dep: str
     arr: str
@@ -311,237 +275,37 @@ class TransferIn(TimetableIn):
     limit: int = Field(default=10, ge=1, le=30)
 
 
-class SRTJobIn(BaseModel):
-    dep: str
-    arr: str
-    date: str = Field(pattern=r"^\d{8}$")
-    time: str = Field(pattern=r"^\d{6}$")
-    train_number: Optional[str] = None
-    passengers: int = Field(ge=1, le=9, default=1)
-    seat_pref: str = Field(default="general", pattern="^(general|special|any)$")
-    # 기본 자동결제 — 카드정보가 Keychain에 저장돼 있어야 한다
-    pay_mode: str = Field(default="auto", pattern="^(auto|manual)$")
-    # 좌석 위치 선호(1인 예매만 적용) — 남은 자리가 그것뿐이면 포기하고 예매
-    prefer_window: bool = True
-    avoid_edge_rows: bool = True
+def _station(name: str) -> str:
+    """역명을 표준 표기로 맞추고, 모르는 역이면 400으로 잘라낸다.
 
-
-@srt_router.get("/config/status")
-def srt_config_status():
-    return config.srt.public_status()
-
-
-@srt_router.post("/config")
-def srt_config_save(body: SRTCredsIn):
-    expire, expire_corrected = _normalize_expire(body.card_expire)
-    try:
-        creds = config.SRTCredentials(
-            srt_id=body.srt_id,
-            srt_password=body.srt_password,
-            card_number=body.card_number.replace("-", "").replace(" ", ""),
-            card_password=body.card_password,
-            card_validation=body.card_validation,
-            card_expire=expire,
-            card_type=body.card_type,
-            card_installment=body.card_installment,
-        )
-    except ValidationError as e:
-        msgs = [f"{'.'.join(map(str, err['loc']))}: {err['msg']}" for err in e.errors()]
-        raise HTTPException(status_code=422, detail="; ".join(msgs))
-    config.srt.save(creds)
-    out = config.srt.public_status()
-    out["expire_corrected"], out["card_expire"] = expire_corrected, expire
-    out["login_ok"], out["login_error"] = _srt_login_test(creds)
-    return out
-
-
-@srt_router.delete("/config")
-def srt_config_delete():
-    config.srt.clear()
-    return {"ok": True}
-
-
-@srt_router.get("/config/edit")
-def srt_config_edit():
-    c = config.srt.load()
-    if not c:
-        raise HTTPException(status_code=404, detail="not configured")
-    return {
-        "srt_id": c.srt_id,
-        "card_number": c.card_number,
-        "card_validation": c.card_validation,
-        "card_expire": c.card_expire,
-        "card_type": c.card_type,
-        "card_installment": c.card_installment,
-    }
-
-
-def _srt_login_test(creds: config.SRTCredentials) -> tuple[bool, Optional[str]]:
-    from SRT import SRT
-    try:
-        SRT(creds.srt_id, creds.srt_password)
-        return True, None
-    except Exception as e:
-        return False, str(e)[:200]
-
-
-@srt_router.post("/config/test")
-def srt_config_test():
-    c = config.srt.load()
-    if not c:
-        raise HTTPException(status_code=404, detail="not configured")
-    ok, err = _srt_login_test(c)
-    return {"login_ok": ok, "login_error": err}
-
-
-@srt_router.post("/config/card-test")
-def srt_card_test():
-    c = config.srt.load()
-    if not c:
-        raise HTTPException(status_code=404, detail="not configured")
-    if not c.card_number:
-        raise HTTPException(status_code=400, detail="카드 정보가 없습니다")
-    # SRT는 reserve_info가 referer를 무시해 다른 표를 돌려줄 수 있어, 환불 전
-    # PNR/노선/날짜 일치를 검증하고 보호표가 오면 즉시 중단한다(card_test.py의
-    # 4겹 안전장치). 그래도 자동 환불이 실패하면 결제만 되고 수동 환불이 필요할
-    # 수 있어 summary/steps에 그대로 노출한다.
-    try:
-        r = card_test.srt_card_test()
-    except Exception as e:
-        detail = _safe_err(e)
-        return {
-            "ok": False,
-            "summary": f"카드 테스트 내부 오류: {detail}",
-            "steps": [{"name": "error", "ok": False, "detail": detail}],
-        }
-    return {"ok": r.ok, "summary": r.summary, "steps": r.steps}
-
-
-@srt_router.post("/timetable")
-def srt_timetable(body: TimetableIn):
-    """직행 시간표 비동기 조회 시작 → /api/lookup/{query_id} 폴링."""
-    return {"query_id": _start_lookup(srt_worker.timetable, body.dep, body.arr, body.date, body.time)}
-
-
-@srt_router.post("/transfer")
-def srt_transfer(body: TransferIn):
-    """직행+환승(구간별 조합) 비동기 조회 시작 → /api/lookup/{query_id} 폴링."""
-    return {"query_id": _start_lookup(
-        srt_worker.transfer_search, body.dep, body.arr, body.date, body.time,
-        body.vias, body.min_gap_min, body.limit,
-    )}
-
-
-@srt_router.post("/prefetch")
-def srt_prefetch(body: PrefetchIn):
-    """한달치 시간표 사전 다운로드 시작(수 분~수십 분) → /api/lookup/{id} 폴링."""
-    return {"query_id": _start_lookup(srt_worker.prefetch_timetables, body.routes, body.days)}
-
-
-@srt_router.post("/search/async")
-def srt_search_async(body: SRTSearchIn):
-    """열차 조회 비동기 시작 → /api/lookup/{query_id} 폴링 (result = {"trains": [...]})."""
-    def run():
-        return {"trains": srt_worker.search_preview(body.dep, body.arr, body.date, body.time)}
-    return {"query_id": _start_lookup(run)}
-
-
-@srt_router.post("/search")
-def srt_search(body: SRTSearchIn):
-    try:
-        return {"trains": srt_worker.search_preview(body.dep, body.arr, body.date, body.time)}
-    except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=_safe_err(e))
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"SRT 조회 실패: {_safe_err(e)}")
+    '김천구미'/'신경주'처럼 코레일이 받아주는 다른 표기를 흡수하고, 오타는
+    조회에 들어가기 전에 막는다(코레일 오류 메시지가 불친절하다).
+    """
+    n = stations.canonical(name)
+    if not stations.is_known(n):
+        raise HTTPException(status_code=400, detail=f"모르는 역입니다: {name}")
+    return n
 
 
 def _safe_err(e: Exception) -> str:
-    """Some exception classes (e.g. requests.ConnectTimeout) have buggy
-    __str__ that raises TypeError. Use repr as a guaranteed string."""
+    """일부 예외(requests.ConnectTimeout 등)는 __str__이 TypeError를 낸다 —
+    어떤 경우에도 문자열을 돌려주도록 감싼다."""
     try:
-        s = str(e)
-        if not isinstance(s, str):
+        t = str(e)
+        if not isinstance(t, str):
             raise TypeError
-        return s or f"{type(e).__name__}"
+        return t or f"{type(e).__name__}"
     except Exception:
         return f"{type(e).__name__}: {e!r}"
 
 
-def _srt_to_dict(j: srt_worker.Job) -> dict:
-    return {
-        "id": j.id, "status": j.status,
-        "spec": {
-            "dep": j.spec.dep, "arr": j.spec.arr,
-            "date": j.spec.date, "time": j.spec.time,
-            "train_number": j.spec.train_number,
-            "passengers": j.spec.passengers,
-            "seat_pref": j.spec.seat_pref,
-            "pay_mode": j.spec.pay_mode,
-            "prefer_window": j.spec.prefer_window,
-            "avoid_edge_rows": j.spec.avoid_edge_rows,
-        },
-        "created_at": j.created_at,
-        "attempts": j.attempts,
-        "recoveries": j.recoveries,
-        "reservation": j.reservation_summary,
-        "payment_deadline": j.payment_deadline,
-        "error": j.error,
-    }
+# ─── 통합 엔진 routes ───────────────────────────────────────────────────
+# prefix 없이 만들어 /api/rail(정식)과 /api/ktx(구 경로 호환)에 함께 건다.
+rail_router = APIRouter()
 
 
-@srt_router.get("/jobs")
-def srt_jobs_list():
-    return {"jobs": [_srt_to_dict(j) for j in srt_worker.manager.list()]}
-
-
-@srt_router.post("/jobs")
-def srt_jobs_create(body: SRTJobIn):
-    if not config.srt.exists():
-        raise HTTPException(status_code=400, detail="SRT 자격증명을 먼저 저장해주세요")
-    spec = srt_worker.JobSpec(
-        dep=body.dep, arr=body.arr, date=body.date, time=body.time,
-        train_number=body.train_number, passengers=body.passengers,
-        seat_pref=body.seat_pref, pay_mode=srt_worker.PayMode(body.pay_mode),
-        prefer_window=body.prefer_window, avoid_edge_rows=body.avoid_edge_rows,
-    )
-    dup = srt_worker.manager.find_active_duplicate(spec)
-    if dup:
-        raise HTTPException(
-            status_code=409,
-            detail=f"같은 구간·날짜의 활성 작업이 이미 있습니다: {dup.id} ({dup.status}) — 중복예매 방지",
-        )
-    return _srt_to_dict(srt_worker.manager.create(spec))
-
-
-@srt_router.delete("/jobs/{job_id}")
-def srt_jobs_stop(job_id: str):
-    if not srt_worker.manager.stop(job_id):
-        raise HTTPException(status_code=404, detail="job not found")
-    return {"ok": True}
-
-
-@srt_router.post("/jobs/{job_id}/pay")
-def srt_jobs_confirm_pay(job_id: str):
-    if not srt_worker.manager.confirm_pay(job_id):
-        raise HTTPException(status_code=400, detail="job not in RESERVED state")
-    return {"ok": True}
-
-
-@srt_router.get("/jobs/{job_id}/log")
-def srt_jobs_log(job_id: str, since: int = 0):
-    job = srt_worker.manager.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="job not found")
-    lines = list(job.logs)
-    return {"lines": lines[since:], "next": len(lines), "status": job.status}
-
-
-# ─── KTX routes ─────────────────────────────────────────────────────────
-ktx_router = APIRouter(prefix="/api/ktx")
-
-
-class KTXCredsIn(BaseModel):
+class RailCredsIn(BaseModel):
+    # 입력 키는 구 UI·스킬 호환을 위해 ktx_* 를 그대로 받는다
     ktx_id: str
     ktx_password: str
     card_number: str = ""
@@ -551,21 +315,23 @@ class KTXCredsIn(BaseModel):
     card_installment: int = 0
 
 
-class KTXSearchIn(BaseModel):
+class RailSearchIn(BaseModel):
     dep: str
     arr: str
     date: str
     time: str
-    train_type: str = "ktx"
+    train_type: str = "all"   # 기본 전체 — KTX·SRT를 한 목록에서 본다
 
 
-class KTXJobIn(BaseModel):
+class RailJobIn(BaseModel):
     dep: str
     arr: str
     date: str = Field(pattern=r"^\d{8}$")
     time: str = Field(pattern=r"^\d{6}$")
+    # 열차 지정은 번호로 한다(예: "305"). train_id(차종코드|번호|날짜)는 구 UI 호환용.
+    train_number: Optional[str] = Field(default=None, pattern=r"^\d{1,5}$")
     train_id: Optional[str] = None
-    train_type: str = "ktx"
+    train_type: str = "all"
     passengers: int = Field(ge=1, le=9, default=1)
     seat_pref: str = Field(default="general", pattern="^(general|special|any)$")
     # 기본 자동결제 — 카드정보가 Keychain에 저장돼 있어야 한다
@@ -576,16 +342,16 @@ class KTXJobIn(BaseModel):
     avoid_edge_rows: bool = True
 
 
-@ktx_router.get("/config/status")
-def ktx_config_status():
-    return config.ktx.public_status()
+@rail_router.get("/config/status")
+def rail_config_status():
+    return config.rail.public_status()
 
 
-@ktx_router.post("/config")
-def ktx_config_save(body: KTXCredsIn):
+@rail_router.post("/config")
+def rail_config_save(body: RailCredsIn):
     expire, expire_corrected = _normalize_expire(body.card_expire)
     try:
-        creds = config.KTXCredentials(
+        creds = config.RailCredentials(
             ktx_id=body.ktx_id,
             ktx_password=body.ktx_password,
             card_number=body.card_number.replace("-", "").replace(" ", ""),
@@ -597,26 +363,26 @@ def ktx_config_save(body: KTXCredsIn):
     except ValidationError as e:
         msgs = [f"{'.'.join(map(str, err['loc']))}: {err['msg']}" for err in e.errors()]
         raise HTTPException(status_code=422, detail="; ".join(msgs))
-    config.ktx.save(creds)
-    out = config.ktx.public_status()
+    config.rail.save(creds)
+    out = config.rail.public_status()
     out["expire_corrected"], out["card_expire"] = expire_corrected, expire
-    out["login_ok"], out["login_error"], out["login_name"] = _ktx_login_test(creds)
+    out["login_ok"], out["login_error"], out["login_name"] = _rail_login_test(creds)
     return out
 
 
-@ktx_router.delete("/config")
-def ktx_config_delete():
-    config.ktx.clear()
+@rail_router.delete("/config")
+def rail_config_delete():
+    config.rail.clear()
     return {"ok": True}
 
 
-@ktx_router.get("/config/edit")
-def ktx_config_edit():
-    c = config.ktx.load()
+@rail_router.get("/config/edit")
+def rail_config_edit():
+    c = config.rail.load()
     if not c:
         raise HTTPException(status_code=404, detail="not configured")
     return {
-        "ktx_id": c.ktx_id,
+        "ktx_id": c.rail_id,   # 출력 키는 구 UI 호환 유지
         "card_number": c.card_number,
         "card_validation": c.card_validation,
         "card_expire": c.card_expire,
@@ -624,10 +390,10 @@ def ktx_config_edit():
     }
 
 
-def _ktx_login_test(creds: config.KTXCredentials) -> tuple[bool, Optional[str], Optional[str]]:
-    from ktx_korail import PatchedKorail
+def _rail_login_test(creds: config.RailCredentials) -> tuple[bool, Optional[str], Optional[str]]:
+    from korail_client import PatchedKorail
     try:
-        c = PatchedKorail(creds.ktx_id, creds.ktx_password, auto_login=False)
+        c = PatchedKorail(creds.rail_id, creds.rail_password, auto_login=False)
         if c.login():
             return True, None, getattr(c, "name", None)
         return False, "login returned False (잘못된 아이디/비밀번호)", None
@@ -635,18 +401,18 @@ def _ktx_login_test(creds: config.KTXCredentials) -> tuple[bool, Optional[str], 
         return False, str(e)[:200], None
 
 
-@ktx_router.post("/config/test")
-def ktx_config_test():
-    c = config.ktx.load()
+@rail_router.post("/config/test")
+def rail_config_test():
+    c = config.rail.load()
     if not c:
         raise HTTPException(status_code=404, detail="not configured")
-    ok, err, name = _ktx_login_test(c)
+    ok, err, name = _rail_login_test(c)
     return {"login_ok": ok, "login_error": err, "login_name": name}
 
 
-@ktx_router.post("/config/card-test")
-def ktx_card_test():
-    c = config.ktx.load()
+@rail_router.post("/config/card-test")
+def rail_card_test():
+    c = config.rail.load()
     if not c:
         raise HTTPException(status_code=404, detail="not configured")
     if not c.card_number:
@@ -665,61 +431,62 @@ def ktx_card_test():
     return {"ok": r.ok, "summary": r.summary, "steps": r.steps}
 
 
-class KTXTimetableIn(TimetableIn):
-    train_type: str = "ktx"
+class RailTimetableIn(TimetableIn):
+    train_type: str = "all"
 
 
-class KTXTransferIn(TransferIn):
-    train_type: str = "ktx"
+class RailTransferIn(TransferIn):
+    train_type: str = "all"
 
 
-@ktx_router.post("/timetable")
-def ktx_timetable(body: KTXTimetableIn):
+@rail_router.post("/timetable")
+def rail_timetable(body: RailTimetableIn):
     """직행 시간표 비동기 조회 시작 → /api/lookup/{query_id} 폴링."""
     return {"query_id": _start_lookup(
-        ktx_worker.timetable, body.dep, body.arr, body.date, body.time, body.train_type,
+        rail_worker.timetable, _station(body.dep), _station(body.arr), body.date, body.time, body.train_type,
     )}
 
 
-@ktx_router.post("/transfer")
-def ktx_transfer(body: KTXTransferIn):
+@rail_router.post("/transfer")
+def rail_transfer(body: RailTransferIn):
     """직행+환승(구간별 조합) 비동기 조회 시작 → /api/lookup/{query_id} 폴링."""
     return {"query_id": _start_lookup(
-        ktx_worker.transfer_search, body.dep, body.arr, body.date, body.time,
-        body.vias, body.min_gap_min, body.limit, body.train_type,
+        rail_worker.transfer_search, _station(body.dep), _station(body.arr), body.date, body.time,
+        [_station(v) for v in body.vias], body.min_gap_min, body.limit, body.train_type,
     )}
 
 
-@ktx_router.post("/prefetch")
-def ktx_prefetch(body: PrefetchIn):
+@rail_router.post("/prefetch")
+def rail_prefetch(body: PrefetchIn):
     """한달치 시간표 사전 다운로드 시작(수 분~수십 분) → /api/lookup/{id} 폴링."""
-    return {"query_id": _start_lookup(ktx_worker.prefetch_timetables, body.routes, body.days)}
+    return {"query_id": _start_lookup(rail_worker.prefetch_timetables, body.routes, body.days)}
 
 
-@ktx_router.post("/search/async")
-def ktx_search_async(body: KTXSearchIn):
+@rail_router.post("/search/async")
+def rail_search_async(body: RailSearchIn):
     """열차 조회 비동기 시작 → /api/lookup/{query_id} 폴링 (result = {"trains": [...]})."""
     def run():
-        return {"trains": ktx_worker.search_preview(body.dep, body.arr, body.date, body.time, body.train_type)}
+        return {"trains": rail_worker.search_preview(_station(body.dep), _station(body.arr), body.date, body.time, body.train_type)}
     return {"query_id": _start_lookup(run)}
 
 
-@ktx_router.post("/search")
-def ktx_search(body: KTXSearchIn):
+@rail_router.post("/search")
+def rail_search(body: RailSearchIn):
     try:
-        return {"trains": ktx_worker.search_preview(body.dep, body.arr, body.date, body.time, body.train_type)}
+        return {"trains": rail_worker.search_preview(_station(body.dep), _station(body.arr), body.date, body.time, body.train_type)}
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=_safe_err(e))
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"KTX 조회 실패: {_safe_err(e)}")
+        raise HTTPException(status_code=502, detail=f"조회 실패: {_safe_err(e)}")
 
 
-def _ktx_to_dict(j: ktx_worker.Job) -> dict:
+def _job_to_dict(j: rail_worker.Job) -> dict:
     return {
         "id": j.id, "status": j.status,
         "spec": {
             "dep": j.spec.dep, "arr": j.spec.arr,
             "date": j.spec.date, "time": j.spec.time,
+            "train_number": j.spec.train_number,
             "train_id": j.spec.train_id,
             "train_type": j.spec.train_type,
             "passengers": j.spec.passengers,
@@ -739,60 +506,62 @@ def _ktx_to_dict(j: ktx_worker.Job) -> dict:
     }
 
 
-@ktx_router.get("/jobs")
-def ktx_jobs_list():
-    return {"jobs": [_ktx_to_dict(j) for j in ktx_worker.manager.list()]}
+@rail_router.get("/jobs")
+def rail_jobs_list():
+    return {"jobs": [_job_to_dict(j) for j in rail_worker.manager.list()]}
 
 
-@ktx_router.post("/jobs")
-def ktx_jobs_create(body: KTXJobIn):
-    if not config.ktx.exists():
-        raise HTTPException(status_code=400, detail="KTX 자격증명을 먼저 저장해주세요")
-    creds = config.ktx.load()
+@rail_router.post("/jobs")
+def rail_jobs_create(body: RailJobIn):
+    if not config.rail.exists():
+        raise HTTPException(status_code=400, detail="코레일 자격증명을 먼저 저장해주세요")
+    creds = config.rail.load()
     if body.pay_mode == "auto" and (not creds or not creds.card_number):
         raise HTTPException(status_code=400, detail="자동 결제 모드는 카드정보 저장이 필요합니다")
-    spec = ktx_worker.JobSpec(
-        dep=body.dep, arr=body.arr, date=body.date, time=body.time,
-        train_id=body.train_id, train_type=body.train_type,
+    spec = rail_worker.JobSpec(
+        dep=_station(body.dep), arr=_station(body.arr), date=body.date, time=body.time,
+        train_number=body.train_number, train_id=body.train_id,
+        train_type=body.train_type,
         passengers=body.passengers, seat_pref=body.seat_pref,
-        pay_mode=ktx_worker.PayMode(body.pay_mode),
+        pay_mode=rail_worker.PayMode(body.pay_mode),
         include_waiting=body.include_waiting,
         prefer_window=body.prefer_window, avoid_edge_rows=body.avoid_edge_rows,
     )
-    dup = ktx_worker.manager.find_active_duplicate(spec)
+    dup = rail_worker.manager.find_active_duplicate(spec)
     if dup:
         raise HTTPException(
             status_code=409,
             detail=f"같은 구간·날짜의 활성 작업이 이미 있습니다: {dup.id} ({dup.status}) — 중복예매 방지",
         )
-    return _ktx_to_dict(ktx_worker.manager.create(spec))
+    return _job_to_dict(rail_worker.manager.create(spec))
 
 
-@ktx_router.delete("/jobs/{job_id}")
-def ktx_jobs_stop(job_id: str):
-    if not ktx_worker.manager.stop(job_id):
+@rail_router.delete("/jobs/{job_id}")
+def rail_jobs_stop(job_id: str):
+    if not rail_worker.manager.stop(job_id):
         raise HTTPException(status_code=404, detail="job not found")
     return {"ok": True}
 
 
-@ktx_router.post("/jobs/{job_id}/pay")
-def ktx_jobs_confirm_pay(job_id: str):
-    if not ktx_worker.manager.confirm_pay(job_id):
+@rail_router.post("/jobs/{job_id}/pay")
+def rail_jobs_confirm_pay(job_id: str):
+    if not rail_worker.manager.confirm_pay(job_id):
         raise HTTPException(status_code=400, detail="job not in RESERVED state")
     return {"ok": True}
 
 
-@ktx_router.get("/jobs/{job_id}/log")
-def ktx_jobs_log(job_id: str, since: int = 0):
-    job = ktx_worker.manager.get(job_id)
+@rail_router.get("/jobs/{job_id}/log")
+def rail_jobs_log(job_id: str, since: int = 0):
+    job = rail_worker.manager.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
     lines = list(job.logs)
     return {"lines": lines[since:], "next": len(lines), "status": job.status}
 
 
-app.include_router(srt_router)
-app.include_router(ktx_router)
+app.include_router(rail_router, prefix="/api/rail")
+# 구 경로 호환 — v2 UI·/krail 스킬·폰 디스패치가 /api/ktx/* 를 부른다.
+app.include_router(rail_router, prefix="/api/ktx")
 
 
 def _another_instance_running() -> bool:
@@ -805,7 +574,7 @@ def _another_instance_running() -> bool:
     import urllib.request
     try:
         with urllib.request.urlopen(
-            "http://127.0.0.1:8912/api/srt/config/status", timeout=3
+            "http://127.0.0.1:8912/api/meta", timeout=3
         ) as r:
             return r.status == 200
     except Exception:

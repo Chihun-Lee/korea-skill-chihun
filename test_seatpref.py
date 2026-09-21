@@ -23,9 +23,7 @@ import jobstore
 jobstore.PATH = Path(tempfile.mkdtemp()) / "jobs.json"
 
 import seatpref
-import srt_worker
-import ktx_worker
-from SRT.errors import SRTError
+import rail_worker
 
 
 # ── 1. seatpref 순수 로직 ────────────────────────────────────────────────
@@ -64,35 +62,6 @@ def test_scoring():
     print("  [ok] 채점(창측 2점 + 비가장자리 1점, 그룹은 최악 기준)")
 
 
-def test_train_no_padding():
-    assert srt_worker._same_train_no("323", "00323")
-    assert ktx_worker._same_train_no("00123", "123")
-    assert not srt_worker._same_train_no("323", "324")
-    spec = srt_worker.JobSpec(
-        dep="수서", arr="창원중앙", date="20991201", time="090000",
-        train_number="323", passengers=1, seat_pref="general",
-        pay_mode=srt_worker.PayMode.AUTO,
-    )
-    r = types.SimpleNamespace(
-        dep_station_name="수서", arr_station_name="창원중앙",
-        dep_date="20991201", train_number="00323", paid=False,
-    )
-    assert srt_worker._spec_matches_reservation(spec, r), \
-        "0-패딩 차이로 같은 열차 예약을 중복으로 못 잡음"
-    print("  [ok] 열차번호 0-패딩 차이 흡수('323'=='00323') — 중복검사 누락 버그 수정")
-
-
-# ── 2. SRT 사후 스윕 / 좌석 개선 ────────────────────────────────────────
-def _srt_spec(**kw):
-    base = dict(
-        dep="수서", arr="창원중앙", date="20991201", time="090000",
-        train_number=None, passengers=1, seat_pref="general",
-        pay_mode=srt_worker.PayMode.AUTO,
-    )
-    base.update(kw)
-    return srt_worker.JobSpec(**base)
-
-
 def _res(no, train="00301", seats=("7A",), paid=False, types_=("일반실",)):
     return types.SimpleNamespace(
         reservation_number=no, train_number=train, paid=paid,
@@ -103,130 +72,15 @@ def _res(no, train="00301", seats=("7A",), paid=False, types_=("일반실",)):
     )
 
 
-class FakeSRTSweep:
-    def __init__(self, history):
-        self.history = history
-        self.cancelled = []
-
-    def get_reservations(self):
-        return list(self.history)
-
-    def cancel(self, r):
-        self.cancelled.append(r.reservation_number)
-        return True
-
-
-def test_srt_sweep_cancels_same_train_extra():
-    ours = _res("R1")
-    extra = _res("R2")                      # 같은 열차 중복 (사고)
-    other_train = _res("R3", train="00777")  # 다른 열차 (의도적일 수 있음)
-    srt = FakeSRTSweep([ours, extra, other_train])
-    job = srt_worker.Job(id="t1", spec=_srt_spec())
-    kept, done = srt_worker.manager._post_reserve_sweep(srt, job, ours)
-    assert kept is ours and not done
-    assert srt.cancelled == ["R2"], f"초과분만 취소해야 함: {srt.cancelled}"
-    print("  [ok] SRT 스윕: 같은 열차 중복(R2)만 취소, 다른 열차(R3)는 보존")
-
-
-def test_srt_sweep_yields_to_paid_ticket():
-    ours = _res("R1")
-    paid = _res("R2", paid=True)
-    srt = FakeSRTSweep([ours, paid])
-    job = srt_worker.Job(id="t2", spec=_srt_spec())
-    kept, done = srt_worker.manager._post_reserve_sweep(srt, job, ours)
-    assert kept is None and done
-    assert srt.cancelled == ["R1"], "이미 결제표가 있으면 방금 예약을 취소해야 함"
-    assert job.status == srt_worker.JobStatus.PAID
-    assert "[기존 결제 표 사용]" in (job.reservation_summary or "")
-    print("  [ok] SRT 스윕: 기존 결제표 발견 → 신규예약 취소 + PAID 종료(중복결제 차단)")
-
-
-class FakeSRTImprove:
-    """개선 흐름용: 검색→(취소→재예약) 기록."""
-
-    def __init__(self, first_seats, retry_seats, available=True, window_fails=False):
-        self.available = available
-        self.window_fails = window_fails
-        self.retry_seats = retry_seats
-        self.cancelled = []
-        self.reserve_calls = []  # (window_seat,) 기록
-
-    def search_train(self, *a, **kw):
-        avail = self.available
-        return [types.SimpleNamespace(
-            train_number="301",
-            general_seat_available=lambda: avail,
-            special_seat_available=lambda: False,
-        )]
-
-    def cancel(self, r):
-        self.cancelled.append(r.reservation_number)
-        return True
-
-    def reserve(self, target, passengers=None, special_seat=None, window_seat=None):
-        self.reserve_calls.append(window_seat)
-        if window_seat and self.window_fails:
-            raise SRTError("창측 좌석 없음")
-        return _res("R-NEW", seats=self.retry_seats)
-
-
-def test_srt_improve_swaps_bad_seat():
-    ours = _res("R1", seats=("1B",))  # 통로측 + 맨앞열 = 최악
-    srt = FakeSRTImprove(("1B",), ("7A",))
-    job = srt_worker.Job(id="t3", spec=_srt_spec())
-    from SRT import SeatType, Adult
-    out = srt_worker.manager._improve_seat(
-        srt, job, [Adult(1)], SeatType.GENERAL_FIRST, ours, lambda: True)
-    assert out.reservation_number == "R-NEW"
-    assert srt.cancelled == ["R1"]
-    assert srt.reserve_calls[0] is True, "창측 우선으로 재예약해야 함"
-    print("  [ok] SRT 개선: 나쁜 좌석(1B) + 잔여석 있음 → 취소·재예약(창측)으로 교체")
-
-
-def test_srt_improve_keeps_last_seat():
-    ours = _res("R1", seats=("1B",))
-    srt = FakeSRTImprove(("1B",), ("7A",), available=False)  # 남은 좌석 없음
-    job = srt_worker.Job(id="t4", spec=_srt_spec())
-    from SRT import SeatType, Adult
-    out = srt_worker.manager._improve_seat(
-        srt, job, [Adult(1)], SeatType.GENERAL_FIRST, ours, lambda: True)
-    assert out is ours and srt.cancelled == [], "마지막 남은 자리는 그대로 진행해야 함"
-    print("  [ok] SRT 개선: 잔여석 없음 → 나쁜 좌석이라도 취소하지 않고 그대로 진행")
-
-
-def test_srt_improve_skips_group_booking():
-    ours = _res("R1", seats=("1B", "1C"))
-    srt = FakeSRTImprove(("1B",), ("7A",))
-    job = srt_worker.Job(id="t5", spec=_srt_spec(passengers=2))
-    from SRT import SeatType, Adult
-    out = srt_worker.manager._improve_seat(
-        srt, job, [Adult(2)], SeatType.GENERAL_FIRST, ours, lambda: True)
-    assert out is ours and srt.cancelled == [], "다인 예매는 개선 대상이 아님"
-    print("  [ok] SRT 개선: 2인 이상 예매는 좌석 개선 생략(나란한 좌석 우선)")
-
-
-def test_srt_window_fallback():
-    srt = FakeSRTImprove(("7A",), ("7B",), window_fails=True)
-    job = srt_worker.Job(id="t6", spec=_srt_spec())
-    from SRT import SeatType, Adult
-    target = types.SimpleNamespace(train_number="301")
-    out = srt_worker.manager._reserve_with_pref(
-        srt, job, target, [Adult(1)], SeatType.GENERAL_FIRST)
-    assert out is not None
-    assert srt.reserve_calls == [True, None], \
-        f"창측 실패 후 위치 무관으로 재시도해야 함: {srt.reserve_calls}"
-    print("  [ok] SRT 창측 폴백: 창측 실패 → 위치 무관 즉시 재시도(자리 놓치지 않음)")
-
-
 # ── 3. KTX 사후 스윕 / 좌석 개선 ────────────────────────────────────────
 def _ktx_spec(**kw):
     base = dict(
         dep="동대구", arr="서울", date="20991201", time="090000",
-        train_id=None, train_type="ktx", passengers=1, seat_pref="general",
-        pay_mode=ktx_worker.PayMode.AUTO,
+        train_number=None, train_id=None, train_type="ktx", passengers=1, seat_pref="general",
+        pay_mode=rail_worker.PayMode.AUTO,
     )
     base.update(kw)
-    return ktx_worker.JobSpec(**base)
+    return rail_worker.JobSpec(**base)
 
 
 def _krsv(rsv_id, train="00123", seats=("7A",), waiting=False):
@@ -259,8 +113,8 @@ def test_ktx_sweep_cancels_same_train_extra():
     ours = _krsv("P1")
     extra = _krsv("P2")
     client = FakeKorailSweep([], [ours, extra])
-    job = ktx_worker.Job(id="k1", spec=_ktx_spec())
-    kept, done = ktx_worker.manager._post_reserve_sweep(client, job, ours)
+    job = rail_worker.Job(id="k1", spec=_ktx_spec())
+    kept, done = rail_worker.manager._post_reserve_sweep(client, job, ours)
     assert kept is ours and not done
     assert client.cancelled == ["P2"]
     print("  [ok] KTX 스윕: 같은 열차 중복(P2)만 취소")
@@ -271,11 +125,11 @@ def test_ktx_sweep_yields_to_paid_ticket():
     paid_ticket = types.SimpleNamespace(
         dep_name="동대구", arr_name="서울", dep_date="20991201", train_no="00123")
     client = FakeKorailSweep([paid_ticket], [ours])
-    job = ktx_worker.Job(id="k2", spec=_ktx_spec())
-    kept, done = ktx_worker.manager._post_reserve_sweep(client, job, ours)
+    job = rail_worker.Job(id="k2", spec=_ktx_spec())
+    kept, done = rail_worker.manager._post_reserve_sweep(client, job, ours)
     assert kept is None and done
     assert client.cancelled == ["P1"]
-    assert job.status == ktx_worker.JobStatus.PAID
+    assert job.status == rail_worker.JobStatus.PAID
     print("  [ok] KTX 스윕: 기존 발권표 발견 → 신규예약 취소 + PAID 종료")
 
 
@@ -307,23 +161,23 @@ class FakeKorailImprove:
 def test_ktx_improve_swaps_bad_seat():
     ours = _krsv("P1", seats=("15B",))  # 통로측 + 뒷열
     client = FakeKorailImprove(("7D",))
-    job = ktx_worker.Job(id="k3", spec=_ktx_spec())
+    job = rail_worker.Job(id="k3", spec=_ktx_spec())
     from srtgo.ktx import AdultPassenger, ReserveOption
-    out = ktx_worker.manager._improve_seat(
+    out = rail_worker.manager._improve_seat(
         client, job, [AdultPassenger(1)], ReserveOption.GENERAL_FIRST,
         ours, lambda: True)
     assert out.rsv_id == "P-NEW"
     assert client.cancelled == ["P1"]
-    assert client.reserve_locs[0] == ktx_worker.SEAT_LOC_WINDOW
+    assert client.reserve_locs[0] == rail_worker.SEAT_LOC_WINDOW
     print("  [ok] KTX 개선: 나쁜 좌석(15B) → 창측(012) 요청으로 재예약")
 
 
 def test_ktx_improve_skips_waiting():
     ours = _krsv("P1", seats=(), waiting=True)
     client = FakeKorailImprove(("7D",))
-    job = ktx_worker.Job(id="k4", spec=_ktx_spec(include_waiting=True))
+    job = rail_worker.Job(id="k4", spec=_ktx_spec(include_waiting=True))
     from srtgo.ktx import AdultPassenger, ReserveOption
-    out = ktx_worker.manager._improve_seat(
+    out = rail_worker.manager._improve_seat(
         client, job, [AdultPassenger(1)], ReserveOption.GENERAL_FIRST,
         ours, lambda: True)
     assert out is ours and client.cancelled == []
@@ -335,14 +189,6 @@ if __name__ == "__main__":
     test_parse_and_window()
     test_edge_rows()
     test_scoring()
-    test_train_no_padding()
-    print("SRT 사후 스윕/좌석 개선:")
-    test_srt_sweep_cancels_same_train_extra()
-    test_srt_sweep_yields_to_paid_ticket()
-    test_srt_improve_swaps_bad_seat()
-    test_srt_improve_keeps_last_seat()
-    test_srt_improve_skips_group_booking()
-    test_srt_window_fallback()
     print("KTX 사후 스윕/좌석 개선:")
     test_ktx_sweep_cancels_same_train_extra()
     test_ktx_sweep_yields_to_paid_ticket()

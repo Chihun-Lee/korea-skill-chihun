@@ -42,7 +42,16 @@ def put(svc: str, dep: str, arr: str, date: str, rows: list[dict]) -> None:
 
 def get(svc: str, dep: str, arr: str, date: str) -> dict | None:
     with _lock:
-        return _read().get(svc, {}).get(f"{dep}→{arr}", {}).get(date)
+        data = _read()
+        hit = data.get(svc, {}).get(f"{dep}→{arr}", {}).get(date)
+        if hit is None and svc == "rail":
+            # v3.0 이전에 받아둔 캐시(kind "ktx"/"srt")도 그대로 쓴다 —
+            # 시각표는 운영사가 달라도 같은 열차 같은 시각이다.
+            for legacy in ("ktx", "srt"):
+                hit = data.get(legacy, {}).get(f"{dep}→{arr}", {}).get(date)
+                if hit is not None:
+                    break
+        return hit
 
 
 def status() -> dict:

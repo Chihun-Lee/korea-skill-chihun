@@ -2,7 +2,7 @@
 chcp 65001 >nul
 cd /d %~dp0
 rem ============================================================
-rem  K-Rail 매크로 (SRT + KTX) 윈도우 단일 exe 빌드
+rem  K-Rail 매크로 (KTX + SRT 통합) 윈도우 단일 exe 빌드
 rem  - 윈도우에서 이 파일을 더블클릭하면 dist\k-rail-macro.exe 생성
 rem  - 사전 요구사항: Python 3.10+ (amd64/x64) — python.org에서
 rem    "Windows installer (64-bit)" 설치 시 "Add python.exe to PATH" 체크
@@ -49,7 +49,7 @@ if errorlevel 1 goto fail
 
 echo.
 echo [완료] dist\k-rail-macro.exe 생성됨
-echo        더블클릭하면 검은 창이 뜨고 브라우저에서 SRT/KTX 탭이 열립니다.
+echo        더블클릭하면 검은 창이 뜨고 브라우저에서 통합 화면이 열립니다.
 pause
 exit /b 0
 

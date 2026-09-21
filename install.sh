@@ -1,5 +1,5 @@
 #!/bin/bash
-# K-Rail (SRT + KTX) 매크로 통합 설치 스크립트 (macOS)
+# K-Rail (KTX + SRT 통합) 매크로 설치 스크립트 (macOS)
 # 사용법:
 #   curl -fsSL https://raw.githubusercontent.com/Chihun-Lee/k-rail-macro/main/install.sh | bash
 set -e
@@ -13,7 +13,7 @@ PORT=8912
 
 echo ""
 echo "════════════════════════════════════════"
-echo "  K-Rail 매크로 (SRT + KTX) 설치"
+echo "  K-Rail 매크로 (KTX + SRT 통합) 설치"
 echo "════════════════════════════════════════"
 echo ""
 
@@ -193,9 +193,9 @@ cd "\$INSTALL_DIR"
 nohup "\$INSTALL_DIR/run_supervised.sh" "\$ARCH_PREFIX" > /dev/null 2>&1 &
 
 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-  if curl -fsS http://127.0.0.1:\$PORT/api/srt/config/status > /dev/null 2>&1; then
+  if curl -fsS http://127.0.0.1:\$PORT/api/meta > /dev/null 2>&1; then
     open "http://127.0.0.1:\$PORT"
-    osascript -e 'display notification "SRT + KTX 탭으로 사용하세요." with title "K-Rail 매크로 시작됨" sound name "Glass"'
+    osascript -e 'display notification "KTX·SRT를 한 화면에서 예매합니다." with title "K-Rail 매크로 시작됨" sound name "Glass"'
     exit 0
   fi
   sleep 1
@@ -251,7 +251,7 @@ echo "════════════════════════�
 echo ""
 echo "  사용법:"
 echo "    1. Launchpad → 'K-Rail 매크로' 검색 → 더블클릭"
-echo "    2. 브라우저가 자동으로 열림 (SRT / KTX 탭)"
+echo "    2. 브라우저가 자동으로 열림 (KTX·SRT 통합 화면)"
 echo "    3. 두 탭 동시 사용 가능"
 echo ""
 echo "  종료: Launchpad → 'K-Rail 매크로 종료' 더블클릭"

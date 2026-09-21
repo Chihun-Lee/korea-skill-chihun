@@ -1,10 +1,15 @@
 # K-Rail 매크로 (K-Rail Macro)
 
-**v2.2.0** · 개발자: **이치헌 (Chihun Lee)** — 버전·개발자 정보는 서버 `/api/meta`와 웹 UI 하단에도 표시된다.
+**v3.0.0** · 개발자: **이치헌 (Chihun Lee)** — 버전·개발자 정보는 서버 `/api/meta`와 웹 UI 하단에도 표시된다.
 
-**SRT + KTX 통합** 매크로. 한 화면에 두 탭, 동시 실행 가능.
+**KTX + SRT를 코레일 계정 하나로** 잡는 매크로. 탭 없는 단일 화면.
 
-> ⚠ **개인용 한정.** 본인 SRT/코레일 계정·본인 카드로만 사용하세요. 자격증명·카드정보는 **macOS Keychain**에 암호화 저장됩니다. 서버는 `127.0.0.1:8912`에만 바인딩됩니다.
+> 🚄 **v3.0 (2026-09-21) — 엔진 통합.** 2026-09 코레일·SR 발매 통합으로 코레일 계정에서
+> SRT 열차까지 조회·예약·결제가 된다(수서~동대구 SRT 335편 예약→취소로 실측 확인).
+> SR 전용 엔진(SRTrain)과 SRT 탭을 걷어내고 코레일 엔진 하나로 합쳤다. 수서·동탄·평택지제
+> 같은 SRT 전용역도 전국 45개 역 목록에 함께 들어간다.
+
+> ⚠ **개인용 한정.** 본인 코레일 계정·본인 카드로만 사용하세요. 자격증명·카드정보는 **macOS Keychain**에 암호화 저장됩니다. 서버는 `127.0.0.1:8912`에만 바인딩됩니다.
 
 ---
 
@@ -24,16 +29,20 @@ curl -fsSL https://raw.githubusercontent.com/Chihun-Lee/k-rail-macro/main/instal
 
 ## 기능
 
-- **하나의 웹앱에 SRT 탭 + KTX 탭** — 둘이 완전히 독립, 동시 실행 가능
-- 폴링 간격: **1~30초 균등 랜덤**
+- **탭 없는 단일 화면** — KTX·SRT가 한 목록에 섞여 나오고, 예매도 코레일 계정 하나로 한다
+  (운영사는 열차번호로 구분해 배지로만 표시: 3xx/6xx = SRT, 나머지 = 코레일)
+- **조회 페이지네이션 (v3.0)** — 코레일 조회 API는 한 번에 ~10편만 준다. 출발시각을
+  밀어가며 이어 받아 **하루치를 전부** 보여준다. (v2에선 목록이 10편에서 잘려 늦은
+  열차는 아예 잡을 수 없었다.) 특정 열차를 노리는 잡은 그 열차를 찾는 즉시 멈춘다.
+- **전국 45개 역** — 수서·동탄·평택지제(SRT 전용역) 포함. 코레일 API에 실제로 넣어
+  하나씩 확인한 목록이고, `김천구미`/`신경주` 같은 다른 표기도 자동 흡수한다.
+- 폴링 간격: **3~90초 균등 랜덤**
 - 결제 모드: **자동 (즉시 결제, 기본)** / 수동 (사용자 확인) — v2.1.1부터 기본 자동
 - **시간표/환승 조회** (v2.2.0): `POST /api/{srt,ktx}/timetable`(직행) ·
   `POST /api/{srt,ktx}/transfer`(직행+환승 조합) → `{"query_id"}` 즉시 반환,
   `GET /api/lookup/{id}` 폴링. 환승은 공식 환승조회가 아니라 **구간별 검색 조합**
   (환승 대기 6분 이상, via 지정) — 각 구간을 별도 잡으로 예약하는 구간별 예약 방식 전제.
-- anti-bot 자동 회복:
-  - SRT NetFunnel "Wrong Server ID" → 캐시 무효화 + 클라이언트 재생성
-  - KTX MACRO ERROR → 클라이언트 재생성 (Dynapath 우회 토큰 자동 갱신)
+- anti-bot 자동 회복: 코레일 MACRO ERROR → 클라이언트 재생성 (Dynapath 우회 토큰 자동 갱신)
 - **표 잡을 때까지 안 멈춤** (세션 중단 방지 4중 장치):
   - 로그인 실패·인터넷 끊김 → 백오프 후 무한 재시도 (ERROR로 죽지 않음)
   - 감시자(watchdog)가 30초마다 검사 → 죽거나 멈춘 폴링 스레드 자동 재시작
@@ -41,8 +50,8 @@ curl -fsSL https://raw.githubusercontent.com/Chihun-Lee/k-rail-macro/main/instal
   - macOS: 서버 크래시 시 2초 후 자동 재기동(`run_supervised.sh`) + 유휴 절전 방지(`caffeinate`)
   - 수동결제 확인 시간초과(~9분)로 예약이 자동취소되면 → 폴링 자동 재개
 - **좌석 선호** (v2.4.0, 1인 예매만 · 기본 켜짐, 잡 등록 시 해제 가능):
-  - **창측 우선**: 예약 요청에 창측 좌석속성(012)을 실어 보낸다 (SRT `window_seat`,
-    KTX `txtSeatAttCd2`). 창측이 없어 실패하면 **위치 무관으로 즉시 재시도** —
+  - **창측 우선**: 예약 요청에 창측 좌석속성(012)을 실어 보낸다 (`txtSeatAttCd2`).
+    창측이 없어 실패하면 **위치 무관으로 즉시 재시도** —
     선호 때문에 자리를 놓치지 않는다.
   - **맨앞/맨뒷열 회피**: 배정 좌석이 1열이거나 호차 뒷열(일반실 15열+, 특실 8열+ 추정)
     또는 통로측이면, **그 열차에 다른 좌석이 남아있는 경우에만** 취소→즉시 재예약으로
@@ -60,14 +69,11 @@ curl -fsSL https://raw.githubusercontent.com/Chihun-Lee/k-rail-macro/main/instal
   켜서 뚜껑을 닫아도 폴링이 계속된다. 잡이 없으면 자동으로 꺼져 평소 배터리엔 영향 없음.
   ⚠ 잡 도는 중 뚜껑 닫은 채 가방에 넣으면 발열 주의. 해제:
   `sudo rm /etc/sudoers.d/k-rail-pmset && sudo pmset -a disablesleep 0`
-- KTX는 KTX/ITX-새마을/무궁화호/누리로/ITX-청춘 모두 지원
+- 열차종류: KTX·SRT(기본 전체) + ITX-새마을/무궁화호/누리로/ITX-청춘
 - 토스트 알림 + 실시간 로그
-- 자격증명/잡 모두 SRT·KTX 별도 관리 (Keychain 항목 분리)
 
 ### 카드 테스트
-둘 다 25일 뒤 평일 첫차를 reserve→pay→refund 하며, 4겹 안전장치 (snapshot · PNR 일치 · route/date 검증 · post-audit)로 **남의 표 환불을 차단**한다. 위약금 약 400원/회.
-- **KTX**: 활성. 서울→광명. 자동 환불 신뢰성 높음.
-- **SRT**: 활성(주의). 김천(구미)→동대구. SRT `reserve_info`가 referer를 무시하고 다른 표를 돌려줄 수 있어 **자동 환불이 실패할 수 있음** — 그 경우 결제만 되고, 화면의 PNR을 SRT 앱에서 직접 환불해야 한다(안전장치가 잘못된 표 환불은 막음). 같은 카드를 KTX로 검증하면 더 안전.
+서울→광명 25일 뒤 평일 첫차를 reserve→pay→refund 하며, 4겹 안전장치 (snapshot · PNR 일치 · route/date 검증 · post-audit)로 **남의 표 환불을 차단**한다. 위약금 약 400원/회.
 
 ## 폰에서 쓰기 (원격 상주 세팅, macOS)
 
@@ -94,14 +100,17 @@ bash setup_remote.sh
 
 ```bash
 # 잡 목록
-curl -s http://127.0.0.1:8912/api/srt/jobs
-# SRT 잡 등록 (예: 수서→부산 8/1 08시 이후, 수동결제)
-curl -s -X POST http://127.0.0.1:8912/api/srt/jobs -H 'Content-Type: application/json' \
+curl -s http://127.0.0.1:8912/api/rail/jobs
+# 잡 등록 (예: 수서→부산 8/1 08시 이후 — KTX·SRT 구분 없이 같은 경로)
+curl -s -X POST http://127.0.0.1:8912/api/rail/jobs -H 'Content-Type: application/json' \
   -d '{"dep":"수서","arr":"부산","date":"20260801","time":"080000","pay_mode":"manual"}'
+# 특정 열차(SRT 305편)만 노릴 때 — train_number로 지정
+curl -s -X POST http://127.0.0.1:8912/api/rail/jobs -H 'Content-Type: application/json' \
+  -d '{"dep":"수서","arr":"부산","date":"20260801","time":"065400","train_number":"305"}'
 # 예약 후 결제 진행 / 잡 중지
-curl -s -X POST http://127.0.0.1:8912/api/srt/jobs/j1/pay
-curl -s -X DELETE http://127.0.0.1:8912/api/srt/jobs/j1
-# KTX는 /api/ktx/* 동일 패턴 (train_id, train_type 필드 사용)
+curl -s -X POST http://127.0.0.1:8912/api/rail/jobs/j1/pay
+curl -s -X DELETE http://127.0.0.1:8912/api/rail/jobs/j1
+# 구 경로 /api/ktx/* 도 같은 라우터라 그대로 동작한다(하위호환). /api/srt/* 는 제거됨.
 ```
 
 관리 명령: 중지 `launchctl bootout gui/$(id -u)/com.chihunlee.k-rail-macro` · 전체 해제 `bash setup_remote.sh --remove` · 로그 `/tmp/k-rail-macro.log`
@@ -116,9 +125,13 @@ curl -s -X DELETE http://127.0.0.1:8912/api/srt/jobs/j1
 
 스킬(`~/.claude/skills/krail`)이 서버 확인(죽어있으면 launchd 재기동) → 잡 등록 → 표 잡히면 Claude 앱 푸시 알림까지 처리한다. 전제조건: ① 맥 전원/네트워크 ON (`setup_remote.sh` launchd 상주 + claude-keepawake) ② 폰 Claude 앱 ↔ 이 맥 연결(Claude Code 원격 세션) ③ 결제는 자동(pay_mode=auto)이 기본 — 수동 확인을 원하면 "수동결제"라고 명시(그 경우 표 잡힌 뒤 "결제 진행해" 답장으로 결제).
 
-## 기존 SRT/KTX 단독 사용자
+## v2에서 올라올 때
 
-- Keychain 항목 이름이 같음 (`srt-macro` / `ktx-macro`) → **저장한 자격증명 그대로 마이그레이션됨**
+- **코레일 자격증명은 그대로 쓴다** — Keychain 항목(`ktx-macro`)·저장 형식을 안 바꿨다.
+  SRT 계정 정보(`srt-macro`)는 이제 쓰지 않는다(Keychain에 남아있어도 무해).
+- 활성 잡은 자동 승계된다 — 저장 파일의 구 `ktx` 항목도 기동 시 함께 복원한다.
+  SR 엔진으로 돌던 잡은 승계되지 않으니 새로 등록해야 한다.
+- Keychain 항목 이름이 같음 (`ktx-macro`) → **저장한 자격증명 그대로 마이그레이션됨**
 - 단독 매크로(8910 / 8911)와 통합 매크로(8912)는 다른 포트라 동시에 실행해도 충돌 없음
 - 단독 매크로 안 쓸 거면 `~/Applications/SRT 매크로.app` / `KTX 매크로.app` 삭제 + `kill $(lsof -ti tcp:8910 -sTCP:LISTEN)` 등으로 정리
 
@@ -140,21 +153,21 @@ python server.py
 
 | 파일 | 용도 |
 |------|------|
-| `server.py` | FastAPI 엔트리, `/api/srt/*` + `/api/ktx/*` 라우팅 |
-| `srt_worker.py` | SRT polling/reserve/pay (SRTrain) |
-| `ktx_worker.py` | KTX polling/reserve/pay (srtgo) |
-| `ktx_korail.py` | srtgo Korail + Dynapath bypass + 좌석위치속성 reserve |
+| `server.py` | FastAPI 엔트리, `/api/rail/*` (+ 구 `/api/ktx/*` 별칭) 라우팅 |
+| `rail_worker.py` | 통합 polling/reserve/pay + 조회 페이지네이션 (`search_all`) |
+| `korail_client.py` | srtgo Korail + Dynapath bypass + 좌석위치속성 reserve |
+| `stations.py` | 코레일에서 동작 확인된 전국 45개 역 + 별칭 |
 | `seatpref.py` | 좌석 선호 판정 (창측/맨앞·뒷열 채점, 순수 로직) |
-| `config.py` | 두 namespace (`config.srt`, `config.ktx`) Keychain 저장 |
+| `config.py` | 코레일 자격증명 1개 namespace (`config.rail`) Keychain 저장 |
 | `jobstore.py` | 활성 잡 디스크 저장/복원 (서버 재시작 시 자동 재개) |
 | `run_supervised.sh` | macOS 서버 감시 루프 (죽으면 자동 재시작) |
 | `setup_lid_mode.sh` | 뚜껑 닫아도 잡 유지용 1회 설정 (pmset sudoers) |
 | `setup_remote.sh` | 폰 원격용 상주 세팅 (launchd + tailscale serve) |
-| `static/index.html` | 탭 UI, 두 서비스 공통 JS |
+| `static/index.html` | 단일 화면 UI (역 칩은 `/api/stations`가 출처) |
+| `test_v3.py` | v3.0 핵심 로직 테스트 (페이지네이션·대상선택·역명) |
 | `install.sh` | 친구용 원클릭 설치 |
 
 ### 라이선스 / 출처
 
-- [SRTrain](https://github.com/ryanking13/SRT) (MIT) — SRT 클라이언트
-- [srtgo](https://github.com/lapis42/srtgo) (MIT) — KTX `pay_with_card` 구현
+- [srtgo](https://github.com/lapis42/srtgo) (MIT) — 코레일 클라이언트 / `pay_with_card` 구현
 - Dynapath bypass — [nomadamas/k-skill](https://github.com/nomadamas/k-skill) (MIT)

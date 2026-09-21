@@ -84,10 +84,10 @@ done
 [ -z "$BOOTSTRAPPED" ] && { echo "  ✗ launchd 등록 실패"; exit 1; }
 
 for i in $(seq 1 15); do
-  curl -fsS "http://127.0.0.1:$PORT/api/srt/config/status" >/dev/null 2>&1 && break
+  curl -fsS "http://127.0.0.1:$PORT/api/meta" >/dev/null 2>&1 && break
   sleep 1
 done
-if curl -fsS "http://127.0.0.1:$PORT/api/srt/config/status" >/dev/null 2>&1; then
+if curl -fsS "http://127.0.0.1:$PORT/api/meta" >/dev/null 2>&1; then
   echo "  ✓ 서버 상주 시작됨 (http://127.0.0.1:$PORT)"
 else
   echo "  ✗ 서버가 안 뜸 — 로그 확인: $LOG"; exit 1

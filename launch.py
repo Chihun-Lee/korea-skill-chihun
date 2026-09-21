@@ -1,4 +1,4 @@
-"""Windows 단일 exe 진입점 (SRT + KTX 통합).
+"""Windows 단일 exe 진입점 (KTX + SRT 통합 — 코레일 단일 엔진).
 
 서버를 127.0.0.1:8912에 띄우고, 잠시 뒤 기본 브라우저로 GUI를 연다.
 이 콘솔 창을 닫으면(또는 Ctrl+C) 서버가 종료된다.
@@ -44,7 +44,7 @@ def _pause(msg: str = "\n엔터를 누르면 이 창을 닫습니다... ") -> No
 
 if __name__ == "__main__":
     print("=" * 56)
-    print("  K-Rail 매크로 (SRT + KTX) 실행 중")
+    print("  K-Rail 매크로 (KTX + SRT 통합) 실행 중")
     print(f"  브라우저에서 {URL} 가 열립니다.")
     print("  종료하려면 이 창을 닫거나 Ctrl+C 를 누르세요.")
     print("=" * 56)
