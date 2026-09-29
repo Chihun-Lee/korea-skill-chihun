@@ -1,10 +1,10 @@
 #!/bin/bash
 # K-Rail (KTX + SRT 통합) 매크로 설치 스크립트 (macOS)
 # 사용법:
-#   curl -fsSL https://raw.githubusercontent.com/Chihun-Lee/k-rail-macro/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Chihun-Lee/korea-skill-chihun/main/install.sh | bash
 set -e
 
-REPO="https://github.com/Chihun-Lee/k-rail-macro.git"
+REPO="https://github.com/Chihun-Lee/korea-skill-chihun.git"
 INSTALL_DIR="${K_RAIL_HOME:-$HOME/.k-rail-macro}"
 APP_DIR="$HOME/Applications"
 RUN_APP="$APP_DIR/K-Rail 매크로.app"
@@ -101,10 +101,10 @@ else
   # git 없음(또는 비 git 설치본 업데이트) → main 브랜치 tarball 로 덮어쓴다.
   # jobs.json·venv 등 코드 밖 파일은 건드리지 않는다.
   TMP_TGZ="$(mktemp -d)"
-  curl -fsSL "https://codeload.github.com/Chihun-Lee/k-rail-macro/tar.gz/refs/heads/main" \
+  curl -fsSL "https://codeload.github.com/Chihun-Lee/korea-skill-chihun/tar.gz/refs/heads/main" \
     | tar -xz -C "$TMP_TGZ"
   mkdir -p "$INSTALL_DIR"
-  cp -R "$TMP_TGZ"/k-rail-macro-main/. "$INSTALL_DIR"/
+  cp -R "$TMP_TGZ"/*-main/. "$INSTALL_DIR"/
   rm -rf "$TMP_TGZ"
   chmod +x "$INSTALL_DIR"/*.sh 2>/dev/null || true
 fi
