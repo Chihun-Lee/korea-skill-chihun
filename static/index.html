@@ -221,7 +221,8 @@
       <option value="nuriro">누리로</option>
       <option value="itx-cheongchun">ITX-청춘</option>
     </select>
-    <label>인원</label><input id="j-pax" type="number" value="1" min="1" max="9" style="width:60px">
+    <label>어른</label><input id="j-pax" type="number" value="1" min="0" max="9" style="width:60px">
+    <label title="만 65세 이상 — KTX 30%·일반열차 할인, 승차 시 신분증 지참">경로(65세+)</label><input id="j-senior" type="number" value="0" min="0" max="9" style="width:60px">
   </div>
   <div class="row">
     <label>좌석 선호</label>
@@ -491,13 +492,17 @@ $("btn-search").onclick = async () => {
 $("btn-create-job").onclick = async () => {
   if (!$("j-date").value) { alert("날짜를 선택하세요."); return; }
   if (picks["j-dep"] === picks["j-arr"]) { alert("출발역과 도착역이 같습니다."); return; }
+  const adults = parseInt($("j-pax").value, 10) || 0;
+  const seniors = parseInt($("j-senior").value, 10) || 0;
+  if (adults + seniors < 1 || adults + seniors > 9) { alert("인원은 어른+경로 합계 1~9명입니다."); return; }
   try {
     const body = {
       dep: picks["j-dep"], arr: picks["j-arr"],
       date: ymd($("j-date").value), time: hms($("j-time").value),
       train_number: $("j-train").value.trim() || null,
       train_type: $("j-type").value,
-      passengers: parseInt($("j-pax").value, 10),
+      passengers: adults + seniors,
+      seniors: seniors,
       seat_pref: $("j-seat").value, pay_mode: $("j-pay").value,
       include_waiting: $("j-waiting").checked,
       prefer_window: $("j-window").checked,
@@ -553,6 +558,7 @@ async function refreshJobs() {
       `<b>${j.id}</b> · <span class="status-${j.status}">${j.status}</span>
        · ${s.dep}→${s.arr} ${s.date} ${hhmm(s.time)}
        · ${trainInfo}
+       · ${s.seniors ? `어른 ${s.passengers - s.seniors} + 경로 ${s.seniors}` : `${s.passengers}명`}
        · 좌석 ${s.seat_pref}, 결제 ${s.pay_mode}, 시도 ${j.attempts}
        ${j.reservation ? `<br>📋 ${j.reservation}` : ""}
        ${j.payment_deadline ? `<br>⏰ 결제기한: ${j.payment_deadline}` : ""}

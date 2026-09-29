@@ -50,7 +50,7 @@ if [ -z "$PYTHON_BIN" ]; then
   if ! curl -fsSL "$PKG_URL" -o "$TMP_PKG"; then
     echo "  ✗ 다운로드 실패. 네트워크 확인 후 재시도, 또는 직접:"
     echo "    https://www.python.org/downloads/macos/ 에서 .pkg 다운로드 → 더블클릭"
-    read -p "  엔터로 종료..."
+    read -p "  엔터로 종료..." < /dev/tty || true
     exit 1
   fi
   echo "  → 설치 (관리자 비밀번호 1회 필요, 1~2분)"
@@ -81,7 +81,7 @@ if [ -z "$PYTHON_BIN" ]; then
   echo "  ✗ Python 3.10+ 자동 설치 실패."
   echo "    https://www.python.org/downloads/macos/ 에서 macOS installer 다운로드 → 더블클릭 설치"
   echo "    설치 완료 후 이 .command 파일을 다시 더블클릭하세요."
-  read -p "  엔터로 종료..."
+  read -p "  엔터로 종료..." < /dev/tty || true
   exit 1
 fi
 PY_VER=$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
@@ -89,12 +89,24 @@ echo "  ✓ Python $PY_VER ($PYTHON_BIN)"
 
 echo "[2/5] 코드 다운로드..."
 mkdir -p "$APP_DIR"
-if [ -d "$INSTALL_DIR/.git" ]; then
+# git 이 실제로 쓸 수 있는지 확인 — 새 맥은 /usr/bin/git 이 Xcode CLT 설치 팝업만
+# 띄우는 껍데기라 `command -v` 만으로는 판별이 안 된다.
+_has_git() { git --version >/dev/null 2>&1 && xcode-select -p >/dev/null 2>&1; }
+if [ -d "$INSTALL_DIR/.git" ] && _has_git; then
   git -C "$INSTALL_DIR" fetch --quiet
   git -C "$INSTALL_DIR" reset --hard origin/main --quiet
-else
-  if [ -d "$INSTALL_DIR" ]; then rm -rf "$INSTALL_DIR"; fi
+elif _has_git && [ ! -d "$INSTALL_DIR" ]; then
   git clone --quiet "$REPO" "$INSTALL_DIR"
+else
+  # git 없음(또는 비 git 설치본 업데이트) → main 브랜치 tarball 로 덮어쓴다.
+  # jobs.json·venv 등 코드 밖 파일은 건드리지 않는다.
+  TMP_TGZ="$(mktemp -d)"
+  curl -fsSL "https://codeload.github.com/Chihun-Lee/k-rail-macro/tar.gz/refs/heads/main" \
+    | tar -xz -C "$TMP_TGZ"
+  mkdir -p "$INSTALL_DIR"
+  cp -R "$TMP_TGZ"/k-rail-macro-main/. "$INSTALL_DIR"/
+  rm -rf "$TMP_TGZ"
+  chmod +x "$INSTALL_DIR"/*.sh 2>/dev/null || true
 fi
 echo "  ✓ $INSTALL_DIR"
 
@@ -132,7 +144,7 @@ if ! $ARCH_PREFIX "$VENV_PY" -m pip --version >/dev/null 2>&1; then
 fi
 if ! $ARCH_PREFIX "$VENV_PY" -m pip --version >/dev/null 2>&1; then
   echo "  ✗ pip 부트스트랩 실패. https://www.python.org/downloads/macos/ 에서 Python 재설치 후 다시 시도."
-  read -p "  엔터로 종료..."
+  read -p "  엔터로 종료..." < /dev/tty || true
   exit 1
 fi
 $ARCH_PREFIX "$VENV_PY" -m pip install --quiet --upgrade pip
@@ -252,12 +264,12 @@ echo ""
 echo "  사용법:"
 echo "    1. Launchpad → 'K-Rail 매크로' 검색 → 더블클릭"
 echo "    2. 브라우저가 자동으로 열림 (KTX·SRT 통합 화면)"
-echo "    3. 두 탭 동시 사용 가능"
+echo "    3. 경로우대(만 65세+) 할인은 잡 등록 시 '경로' 인원으로 입력"
 echo ""
 echo "  종료: Launchpad → 'K-Rail 매크로 종료' 더블클릭"
 echo ""
 
-read -p "  지금 바로 실행할까요? [y/N] " -n 1 -r
+read -p "  지금 바로 실행할까요? [y/N] " -n 1 -r < /dev/tty || REPLY=""
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
   open "$RUN_APP"

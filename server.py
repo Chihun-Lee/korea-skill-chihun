@@ -33,8 +33,9 @@ ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
 # 조회, 프리페치 캐시, 좌석 선호까지). 3.0.0에서 코레일·SR 발매 통합에 맞춰
 # 엔진을 코레일 하나로 합쳤다 — 탭 없는 단일 화면, 수서·동탄·평택지제 포함
 # 전국 46개 역, 조회 페이지네이션(하루치 전부), 열차번호 기준 잡 등록.
-VERSION = "3.0.0"
-BUILD_DATE = "2026-09-21"  # 마지막 업데이트일 — 버전 올릴 때 같이 갱신
+# 3.1.0: 경로우대(만 65세+) 승객 할인 — 잡 스펙 seniors.
+VERSION = "3.1.0"
+BUILD_DATE = "2026-09-29"  # 마지막 업데이트일 — 버전 올릴 때 같이 갱신
 DEVELOPER = "이치헌 (Chihun Lee)"
 APP_NAME = "K-Rail Macro"
 
@@ -333,6 +334,8 @@ class RailJobIn(BaseModel):
     train_id: Optional[str] = None
     train_type: str = "all"
     passengers: int = Field(ge=1, le=9, default=1)
+    # passengers 중 경로우대(만 65세 이상) 인원. 0이면 전원 어른.
+    seniors: int = Field(ge=0, le=9, default=0)
     seat_pref: str = Field(default="general", pattern="^(general|special|any)$")
     # 기본 자동결제 — 카드정보가 Keychain에 저장돼 있어야 한다
     pay_mode: str = Field(default="auto", pattern="^(auto|manual)$")
@@ -490,6 +493,7 @@ def _job_to_dict(j: rail_worker.Job) -> dict:
             "train_id": j.spec.train_id,
             "train_type": j.spec.train_type,
             "passengers": j.spec.passengers,
+            "seniors": j.spec.seniors,
             "seat_pref": j.spec.seat_pref,
             "pay_mode": j.spec.pay_mode,
             "include_waiting": j.spec.include_waiting,
@@ -518,11 +522,13 @@ def rail_jobs_create(body: RailJobIn):
     creds = config.rail.load()
     if body.pay_mode == "auto" and (not creds or not creds.card_number):
         raise HTTPException(status_code=400, detail="자동 결제 모드는 카드정보 저장이 필요합니다")
+    if body.seniors > body.passengers:
+        raise HTTPException(status_code=400, detail="경로우대 인원이 총 인원보다 많습니다")
     spec = rail_worker.JobSpec(
         dep=_station(body.dep), arr=_station(body.arr), date=body.date, time=body.time,
         train_number=body.train_number, train_id=body.train_id,
         train_type=body.train_type,
-        passengers=body.passengers, seat_pref=body.seat_pref,
+        passengers=body.passengers, seniors=body.seniors, seat_pref=body.seat_pref,
         pay_mode=rail_worker.PayMode(body.pay_mode),
         include_waiting=body.include_waiting,
         prefer_window=body.prefer_window, avoid_edge_rows=body.avoid_edge_rows,

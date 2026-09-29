@@ -21,6 +21,7 @@ from typing import Deque, Optional
 
 from srtgo.ktx import (
     AdultPassenger,
+    SeniorPassenger,
     KorailError,
     NeedToLoginError,
     NoResultsError,
@@ -143,6 +144,28 @@ class JobSpec:
     # 남은 좌석이 그것뿐이면 선호를 포기하고 그대로 예매한다.
     prefer_window: bool = True     # 창측 우선
     avoid_edge_rows: bool = True   # 호차 맨앞/맨뒷열 회피
+    # 경로우대(만 65세 이상) 인원 — passengers(총원) 중 몇 명인지. 나머지는 어른.
+    # 코레일 할인코드 131(경로). 승차 시 신분증 확인 대상이다.
+    seniors: int = 0
+
+
+def build_passengers(spec: "JobSpec") -> list:
+    """JobSpec → srtgo 승객 목록 (어른 + 경로우대)."""
+    seniors = max(0, min(spec.seniors, spec.passengers))
+    adults = spec.passengers - seniors
+    out: list = []
+    if adults:
+        out.append(AdultPassenger(adults))
+    if seniors:
+        out.append(SeniorPassenger(seniors))
+    return out
+
+
+def describe_passengers(spec: "JobSpec") -> str:
+    seniors = max(0, min(spec.seniors, spec.passengers))
+    adults = spec.passengers - seniors
+    parts = ([f"어른 {adults}"] if adults else []) + ([f"경로 {seniors}"] if seniors else [])
+    return " + ".join(parts)
 
 
 def _same_train_no(a, b) -> bool:
@@ -459,7 +482,7 @@ class JobManager:
         job.log(
             f"login ok ({getattr(client, 'name', creds.rail_id)}); "
             f"polling {job.spec.dep}->{job.spec.arr} {job.spec.date} {job.spec.time} "
-            f"type={job.spec.train_type}"
+            f"type={job.spec.train_type} 승객={describe_passengers(job.spec)}"
         )
         job.status = JobStatus.POLLING
 
@@ -471,7 +494,7 @@ class JobManager:
 
         seat_option = self._seat_pref_to_option(job.spec.seat_pref)
         train_type = TRAIN_TYPE_MAP.get(job.spec.train_type.lower(), TrainType.KTX)
-        passengers = [AdultPassenger(job.spec.passengers)]
+        passengers = build_passengers(job.spec)
         rc = RecoveryController()
         last_ok = time.monotonic()
         dead_misses = 0  # 당일+특정열차 잡에서 대상이 연속으로 조회 안 된 횟수

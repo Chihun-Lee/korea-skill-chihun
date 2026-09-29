@@ -1,6 +1,6 @@
 # K-Rail 매크로 (K-Rail Macro)
 
-**v3.0.0** · 개발자: **이치헌 (Chihun Lee)** — 버전·개발자 정보는 서버 `/api/meta`와 웹 UI 하단에도 표시된다.
+**v3.1.0** · 개발자: **이치헌 (Chihun Lee)** — 버전·개발자 정보는 서버 `/api/meta`와 웹 UI 하단에도 표시된다.
 
 **KTX + SRT를 코레일 계정 하나로** 잡는 매크로. 탭 없는 단일 화면.
 
@@ -36,6 +36,10 @@ curl -fsSL https://raw.githubusercontent.com/Chihun-Lee/k-rail-macro/main/instal
   열차는 아예 잡을 수 없었다.) 특정 열차를 노리는 잡은 그 열차를 찾는 즉시 멈춘다.
 - **전국 45개 역** — 수서·동탄·평택지제(SRT 전용역) 포함. 코레일 API에 실제로 넣어
   하나씩 확인한 목록이고, `김천구미`/`신경주` 같은 다른 표기도 자동 흡수한다.
+- **경로우대 할인 (v3.1)** — 잡 등록 시 `어른`·`경로(65세+)` 인원을 따로 입력한다.
+  경로 인원은 코레일 할인코드 131로 예약돼 KTX·SRT 30% 할인가로 결제된다(일반열차도 할인).
+  API: `"passengers": 총원, "seniors": 경로 인원` (예: 어른1+경로1 → `passengers:2, seniors:1`).
+  ⚠ 승차 시 경로 대상자 신분증 지참.
 - 폴링 간격: **3~90초 균등 랜덤**
 - 결제 모드: **자동 (즉시 결제, 기본)** / 수동 (사용자 확인) — v2.1.1부터 기본 자동
 - **시간표/환승 조회** (v2.2.0): `POST /api/{srt,ktx}/timetable`(직행) ·
@@ -104,6 +108,9 @@ curl -s http://127.0.0.1:8912/api/rail/jobs
 # 잡 등록 (예: 수서→부산 8/1 08시 이후 — KTX·SRT 구분 없이 같은 경로)
 curl -s -X POST http://127.0.0.1:8912/api/rail/jobs -H 'Content-Type: application/json' \
   -d '{"dep":"수서","arr":"부산","date":"20260801","time":"080000","pay_mode":"manual"}'
+# 경로우대 1명(만 65세+ 부모님 표) — 30% 할인가로 예약
+curl -s -X POST http://127.0.0.1:8912/api/rail/jobs -H 'Content-Type: application/json' \
+  -d '{"dep":"서울","arr":"부산","date":"20261010","time":"080000","passengers":1,"seniors":1}'
 # 특정 열차(SRT 305편)만 노릴 때 — train_number로 지정
 curl -s -X POST http://127.0.0.1:8912/api/rail/jobs -H 'Content-Type: application/json' \
   -d '{"dep":"수서","arr":"부산","date":"20260801","time":"065400","train_number":"305"}'
